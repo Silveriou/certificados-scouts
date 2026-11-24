@@ -5,7 +5,7 @@ import streamlit as st
 from datetime import datetime
 import generator
 importlib.reload(generator)
-from generator import generar_certificado_pdf, pdf_to_image_bytes
+from generator import generar_certificado_pdf, pdf_to_image_bytes, DEFAULT_CONFIG
 
 # Configuración de página
 st.set_page_config(
@@ -40,7 +40,12 @@ def guardar_firmantes(firmantes):
 def cargar_condecoraciones():
     if os.path.exists(CONDECORACIONES_FILE):
         with open(CONDECORACIONES_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+            # Asegurar que cada condecoración tenga su diccionario de config
+            for item in data:
+                if "config" not in item:
+                    item["config"] = DEFAULT_CONFIG.copy()
+            return data
     return []
 
 def guardar_condecoraciones(condec):
@@ -145,7 +150,8 @@ with tab1:
                                 codigo_control=codigo_control,
                                 firmante_izq=firmante_izq_obj,
                                 firmante_der=firmante_der_obj,
-                                firmas_dir=FIRMAS_DIR
+                                firmas_dir=FIRMAS_DIR,
+                                config=condec_obj.get("config")
                             )
                             st.session_state["ultimo_pdf"] = pdf_bytes
                             st.session_state["ultimo_nombre"] = nombre_galardonado.strip().replace(" ", "_")
@@ -234,28 +240,73 @@ with tab2:
 # -------------------------------------------------------------------------
 with tab3:
     st.subheader("Catálogo de Condecoraciones y Formatos PDF")
-    st.info("Aquí puedes cargar los formatos oficiales (PDF limpios) de cada condecoración: Oro, Plata, Bronce, etc.")
+    st.info("Sube aquí tus plantillas PDF limpias. Si algún formato tiene una distribución diferente, puedes calibrar sus coordenadas individuales.")
     
     condec_actuales = cargar_condecoraciones()
     
     if condec_actuales:
         for idx, c in enumerate(condec_actuales):
+            cfg = c.get("config", DEFAULT_CONFIG.copy())
             with st.container():
                 col_cinfo, col_cprev, col_cdel = st.columns([3, 2, 1])
                 with col_cinfo:
-                    st.markdown(f"**Nombre:** {c['nombre']}")
-                    st.caption(f"Archivo: {c['archivo_pdf']}")
+                    st.markdown(f"### {c['nombre']}")
+                    st.caption(f"Archivo: `{c['archivo_pdf']}`")
                 with col_cprev:
                     ruta_pdf = os.path.join(PLANTILLAS_DIR, c["archivo_pdf"])
                     if os.path.exists(ruta_pdf):
                         with open(ruta_pdf, "rb") as f_pdf:
                             pdf_img = pdf_to_image_bytes(f_pdf.read())
-                            st.image(pdf_img, width=120, caption="Miniatura Formato")
+                            st.image(pdf_img, width=110, caption="Miniatura Formato")
                 with col_cdel:
-                    if st.button("🗑️ Eliminar", key=f"del_condec_{idx}"):
+                    if st.button("🗑️ Eliminar Formato", key=f"del_condec_{idx}"):
                         condec_actuales.pop(idx)
                         guardar_condecoraciones(condec_actuales)
                         st.success("Formato eliminado.")
+                        st.rerun()
+                
+                # Desplegable para calibrar coordenadas
+                with st.expander(f"⚙️ Calibrar Posiciones para '{c['nombre']}'"):
+                    st.caption("Ajusta las coordenadas si este formato tiene los textos o firmas en otra posición.")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.markdown("**Nombre y Cédula**")
+                        nuevo_nom_y = st.number_input(f"Altura Y del Nombre:", value=float(cfg.get("nombre_y", 467.0)), step=1.0, key=f"ny_{idx}")
+                        nuevo_nom_tam = st.number_input(f"Tamaño máx. Nombre:", value=int(cfg.get("nombre_tamano_max", 36)), step=1, key=f"nt_{idx}")
+                        nuevo_ced_x = st.number_input(f"Posición X Cédula:", value=float(cfg.get("cedula_x", 257.0)), step=1.0, key=f"cx_{idx}")
+                        nuevo_ced_y = st.number_input(f"Altura Y Cédula:", value=float(cfg.get("cedula_y", 435.1)), step=0.5, key=f"cy_{idx}")
+                        nuevo_ced_tam = st.number_input(f"Tamaño Cédula:", value=float(cfg.get("cedula_tamano", 16.5)), step=0.5, key=f"ct_{idx}")
+                    with col2:
+                        st.markdown("**Firmantes**")
+                        nuevo_fizq_x = st.number_input(f"Centro X Firmante Izq:", value=float(cfg.get("firmante_izq_x", 160.0)), step=2.0, key=f"fix_{idx}")
+                        nuevo_fder_x = st.number_input(f"Centro X Firmante Der:", value=float(cfg.get("firmante_der_x", 452.0)), step=2.0, key=f"fdx_{idx}")
+                        nuevo_f_y = st.number_input(f"Altura Y Firmas:", value=float(cfg.get("firmante_izq_y", 138.0)), step=2.0, key=f"fy_{idx}")
+                        nuevo_f_ancho = st.number_input(f"Ancho Firma:", value=float(cfg.get("ancho_firma", 135.0)), step=5.0, key=f"fa_{idx}")
+                    with col3:
+                        st.markdown("**Fecha y Código de Control**")
+                        nuevo_fec_y = st.number_input(f"Altura Y Fecha:", value=float(cfg.get("lugar_fecha_y", 90.0)), step=1.0, key=f"ly_{idx}")
+                        nuevo_cod_x = st.number_input(f"Centro X Código:", value=float(cfg.get("codigo_control_x", 178.2)), step=1.0, key=f"ccx_{idx}")
+                        nuevo_cod_y = st.number_input(f"Altura Y Código:", value=float(cfg.get("codigo_control_y", 65.5)), step=0.5, key=f"ccy_{idx}")
+                    
+                    if st.button("💾 Guardar Nueva Calibración", key=f"btn_save_cfg_{idx}", type="primary"):
+                        c["config"] = {
+                            "nombre_y": nuevo_nom_y,
+                            "nombre_tamano_max": nuevo_nom_tam,
+                            "cedula_x": nuevo_ced_x,
+                            "cedula_y": nuevo_ced_y,
+                            "cedula_tamano": nuevo_ced_tam,
+                            "firmante_izq_x": nuevo_fizq_x,
+                            "firmante_izq_y": nuevo_f_y,
+                            "firmante_der_x": nuevo_fder_x,
+                            "firmante_der_y": nuevo_f_y,
+                            "ancho_firma": nuevo_f_ancho,
+                            "lugar_fecha_y": nuevo_fec_y,
+                            "codigo_control_x": nuevo_cod_x,
+                            "codigo_control_y": nuevo_cod_y,
+                            "codigo_control_tamano": cfg.get("codigo_control_tamano", 7.5)
+                        }
+                        guardar_condecoraciones(condec_actuales)
+                        st.success(f"¡Configuración de '{c['nombre']}' guardada correctamente!")
                         st.rerun()
                 st.divider()
     else:
@@ -279,8 +330,9 @@ with tab3:
                 condec_actuales.append({
                     "id": nombre_condec.lower().replace(" ", "_"),
                     "nombre": nombre_condec.strip(),
-                    "archivo_pdf": nombre_archivo_pdf
+                    "archivo_pdf": nombre_archivo_pdf,
+                    "config": DEFAULT_CONFIG.copy()
                 })
                 guardar_condecoraciones(condec_actuales)
-                st.success(f"Condecoración '{nombre_condec}' agregada correctamente.")
+                st.success(f"Condecoración '{nombre_condec}' agregada correctamente. Viene precalibrada con las posiciones estándar.")
                 st.rerun()

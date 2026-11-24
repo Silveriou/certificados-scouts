@@ -2,6 +2,21 @@
   {
     "id": "barra_espiritu_bronce",
     "nombre": "Barra Espíritu Scout en Bronce",
-    "archivo_pdf": "barra_espiritu_bronce.pdf"
+    "archivo_pdf": "barra_espiritu_bronce.pdf",
+    "config": {
+      "nombre_y": 467.0,
+      "nombre_tamano_max": 36,
+      "cedula_x": 257.0,
+      "cedula_y": 435.1,
+      "cedula_tamano": 16.5,
+      "lugar_fecha_y": 90.0,
+      "codigo_control_x": 178.2,
+      "codigo_control_y": 65.5,
+      "firmante_izq_x": 160.0,
+      "firmante_izq_y": 138.0,
+      "firmante_der_x": 452.0,
+      "firmante_der_y": 138.0,
+      "ancho_firma": 135.0
+    }
   }
 ]
