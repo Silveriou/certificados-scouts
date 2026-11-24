@@ -14,6 +14,10 @@ from generator import (
     pdf_to_image_bytes,
     unir_certificados_pdf,
     crear_zip_certificados,
+    formatear_cedula_vzla,
+    limpiar_y_convertir_docx_a_pdf,
+    crear_respaldo_sistema_zip,
+    restaurar_respaldo_sistema_zip,
     DEFAULT_CONFIG
 )
 
@@ -37,7 +41,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# Nombres de meses en español
 MESES_ES = {
     1: "enero", 2: "febrero", 3: "marzo", 4: "abril",
     5: "mayo", 6: "junio", 7: "julio", 8: "agosto",
@@ -101,13 +104,15 @@ def guardar_registro(reg):
 
 def registrar_emision(nombre, cedula, condecoracion, codigo, lugar_fecha, firmante_izq, firmante_der):
     reg = cargar_registro()
+    cedula_fmt = formatear_cedula_vzla(cedula)
+    nuevo_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{len(reg) + 1}"
     nuevo_item = {
-        "id": str(len(reg) + 1),
+        "id": nuevo_id,
         "fecha_registro": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "codigo": codigo.strip(),
         "condecoracion": condecoracion.strip(),
         "nombre": nombre.strip().upper(),
-        "cedula": cedula.strip(),
+        "cedula": cedula_fmt,
         "lugar_fecha": lugar_fecha.strip(),
         "firmante_izq": firmante_izq.get("nombre", "") if firmante_izq else "",
         "cargo_izq": firmante_izq.get("cargo", "") if firmante_izq else "",
@@ -131,12 +136,8 @@ def normalizar_columna(col_nombre: str) -> str:
     return str(col_nombre).strip().title()
 
 def leer_archivo_lote(uploaded_file):
-    """
-    Lee archivos Excel (.xlsx/.xls) o CSV usando librerías ligeras sin requerir pandas.
-    """
     filas = []
     fname = uploaded_file.name.lower()
-    
     if fname.endswith(".csv"):
         contenido = uploaded_file.getvalue().decode("utf-8", errors="ignore")
         reader = csv.reader(io.StringIO(contenido))
@@ -170,9 +171,9 @@ def crear_excel_ejemplo():
     ws = wb.active
     ws.title = "Galardonados"
     ws.append(["Nombre", "Cedula", "Condecoracion", "Correlativo"])
-    ws.append(["CARLOS ALBERTO ESPINOZA", "33.792.612", "Barra Espíritu Scout en Bronce", 1])
+    ws.append(["CARLOS ALBERTO ESPINOZA", "33792612", "Barra Espíritu Scout en Bronce", 1])
     ws.append(["MARIA ELENA CHACON", "28.450.119", "Nudo de Servicio en Oro", 2])
-    ws.append(["JOSE LUIS URDANETA", "31.902.833", "Barra de Liderazgo", 3])
+    ws.append(["JOSE LUIS URDANETA", "31902833", "Barra de Liderazgo", 3])
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -188,9 +189,9 @@ def exportar_registro_excel(registros):
         "Firmante Izquierdo", "Cargo Izq", "Firmante Derecho", "Cargo Der"
     ]
     ws.append(headers)
-    for r in registros:
+    for idx, r in enumerate(registros, start=1):
         ws.append([
-            r.get("id", ""),
+            idx,
             r.get("fecha_registro", ""),
             r.get("codigo", ""),
             r.get("condecoracion", ""),
@@ -310,7 +311,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📖 Libro de Registro (Art. 35)",
     "🏷️ Códigos de Control",
     "✍️ Gestión de Firmantes",
-    "📁 Formatos y Plantillas"
+    "📁 Formatos y Respaldo"
 ])
 
 # -------------------------------------------------------------------------
@@ -322,7 +323,7 @@ with tab1:
     codigos_guardados = cargar_codigos()
     
     if not condecoraciones:
-        st.warning("No hay formatos de condecoración cargados. Por favor ve a la pestaña 'Formatos y Plantillas' para agregar uno.")
+        st.warning("No hay formatos de condecoración cargados. Por favor ve a la pestaña 'Formatos y Respaldo' para agregar uno.")
     elif not firmantes:
         st.warning("No hay firmantes registrados. Por favor ve a la pestaña 'Gestión de Firmantes' para agregar al menos uno.")
     else:
@@ -349,11 +350,14 @@ with tab1:
                     help="Se imprimirá en mayúsculas ocupando aproximadamente el 90% de la línea oficial"
                 )
                 
-                cedula = st.text_input(
+                cedula_input = st.text_input(
                     "Cédula de Identidad:",
-                    value="11.289.602",
-                    help="Coloque el número (ej: 11.289.602). El prefijo C.I. V- ya está impreso en el formato."
+                    value="11289602",
+                    help="Puedes escribirla con o sin puntos (ej: 11289602). El sistema colocará los puntos automáticamente."
                 )
+                cedula = formatear_cedula_vzla(cedula_input)
+                if cedula:
+                    st.caption(f"Vista previa de cédula formateada: **V- {cedula}**")
                 
                 st.markdown("---")
                 st.subheader("2. Fecha y Código de Registro")
@@ -433,15 +437,16 @@ with tab1:
                                 st.session_state["ultimo_pdf"] = pdf_bytes
                                 st.session_state["ultimo_nombre"] = nombre_galardonado.strip().replace(" ", "_")
                                 
-                                registrar_emision(
-                                    nombre=nombre_galardonado,
-                                    cedula=cedula,
-                                    condecoracion=condec_obj["nombre"],
-                                    codigo=codigo_control_final,
-                                    lugar_fecha=lugar_fecha,
-                                    firmante_izq=firmante_izq_obj,
-                                    firmante_der=firmante_der_obj
-                                )
+                                if btn_generar:
+                                    registrar_emision(
+                                        nombre=nombre_galardonado,
+                                        cedula=cedula,
+                                        condecoracion=condec_obj["nombre"],
+                                        codigo=codigo_control_final,
+                                        lugar_fecha=lugar_fecha,
+                                        firmante_izq=firmante_izq_obj,
+                                        firmante_der=firmante_der_obj
+                                    )
                         else:
                             st.error(f"El archivo de plantilla '{condec_obj['archivo_pdf']}' no existe.")
                 
@@ -464,10 +469,9 @@ with tab1:
             st.subheader("⚡ Emisión Masiva de Certificados por Lote")
             st.markdown("""
             Esta herramienta te permite emitir decenas de condecoraciones a la vez a partir de una lista en Excel o CSV.
-            El Excel puede llevar: **Nombre**, **Cédula**, y opcionalmente **Condecoración** y **Correlativo**.
+            El Excel puede llevar: **Nombre**, **Cédula** (con o sin puntos), y opcionalmente **Condecoración** y **Correlativo**.
             """)
             
-            # Plantilla descargable de Excel
             buf_ejemplo = crear_excel_ejemplo()
             st.download_button(
                 label="📄 Descargar Plantilla Excel de Ejemplo (.xlsx)",
@@ -521,7 +525,10 @@ with tab1:
                         if not filas_cargadas:
                             st.error("No se encontraron filas con datos en el archivo subido.")
                         else:
-                            st.success(f"Archivo cargado: **{len(filas_cargadas)} personas** detectadas.")
+                            for f in filas_cargadas:
+                                if "Cedula" in f:
+                                    f["Cedula"] = formatear_cedula_vzla(f["Cedula"])
+                            st.success(f"Archivo cargado: **{len(filas_cargadas)} personas** detectadas (cédulas formateadas automáticamente).")
                             st.dataframe(filas_cargadas[:10], use_container_width=True)
                             
                             btn_procesar_lote = st.button("🚀 Procesar y Generar Lote Completo", type="primary", use_container_width=True)
@@ -539,13 +546,11 @@ with tab1:
                                 for i, row in enumerate(filas_cargadas):
                                     status_txt.text(f"Generando certificado {i+1} de {total_filas}...")
                                     nom_persona = str(row.get("Nombre", "")).strip().upper()
-                                    ced_persona = str(row.get("Cedula", "")).strip()
+                                    ced_persona = formatear_cedula_vzla(str(row.get("Cedula", "")))
                                     
-                                    # Determinar condecoración para esta fila
                                     condec_fila_nombre = str(row.get("Condecoracion", "")).strip()
                                     target_condec = None
                                     if condec_fila_nombre:
-                                        # Buscar coincidencia
                                         target_condec = next((c for c in condecoraciones if condec_fila_nombre.lower() in c["nombre"].lower()), None)
                                     if not target_condec:
                                         target_condec = condec_lote_obj
@@ -555,7 +560,6 @@ with tab1:
                                         st.warning(f"Plantilla '{target_condec['archivo_pdf']}' no encontrada para {nom_persona}. Saltando...")
                                         continue
                                         
-                                    # Correlativo
                                     num_corr = row.get("Correlativo", i + 1)
                                     try:
                                         num_corr_int = int(num_corr)
@@ -618,7 +622,7 @@ with tab1:
                         st.error(f"Error al procesar el archivo: {e}")
 
 # -------------------------------------------------------------------------
-# TAB 2: LIBRO DE REGISTRO (ART. 35)
+# TAB 2: LIBRO DE REGISTRO (ART. 35) - CON RE-DESCARGA Y BORRADO INDIVIDUAL
 # -------------------------------------------------------------------------
 with tab2:
     st.subheader("📖 Libro de Registro Oficial de Condecoraciones y Distinciones")
@@ -627,6 +631,8 @@ with tab2:
     """)
     
     registro_actual = cargar_registro()
+    condecoraciones_disp = cargar_condecoraciones()
+    firmantes_disp = cargar_firmantes()
     
     if registro_actual:
         m1, m2, m3 = st.columns(3)
@@ -662,11 +668,65 @@ with tab2:
             ]
         else:
             mostrar = registro_actual
-            
-        st.dataframe(mostrar, use_container_width=True, hide_index=True)
+
+        st.markdown("### 📋 Listado de Emisiones (Re-descarga y Gestión Individual)")
+        for idx_r, reg_item in enumerate(mostrar):
+            with st.container():
+                c_det, c_act1, c_act2 = st.columns([4, 1.5, 1])
+                with c_det:
+                    st.markdown(f"**{reg_item.get('nombre', '')}** — `C.I. {reg_item.get('cedula', '')}`")
+                    st.caption(
+                        f"🏅 **{reg_item.get('condecoracion', '')}** | "
+                        f"🏷️ Código: `{reg_item.get('codigo', '')}` | "
+                        f"📅 {reg_item.get('lugar_fecha', '')}"
+                    )
+                with c_act1:
+                    if st.button("🔄 Generar Copia PDF", key=f"reprint_{idx_r}_{reg_item.get('codigo','')}", use_container_width=True):
+                        condec_match = next((c for c in condecoraciones_disp if c["nombre"].lower() == reg_item.get("condecoracion", "").lower()), None)
+                        if not condec_match and condecoraciones_disp:
+                            condec_match = condecoraciones_disp[0]
+                        if condec_match:
+                            ruta_tpl = os.path.join(PLANTILLAS_DIR, condec_match["archivo_pdf"])
+                            if os.path.exists(ruta_tpl):
+                                f_izq_obj = next((f for f in firmantes_disp if f["nombre"] == reg_item.get("firmante_izq")), None)
+                                f_der_obj = next((f for f in firmantes_disp if f["nombre"] == reg_item.get("firmante_der")), None)
+                                pdf_copia = generar_certificado_pdf(
+                                    template_path=ruta_tpl,
+                                    nombre=reg_item.get("nombre", ""),
+                                    cedula=reg_item.get("cedula", ""),
+                                    lugar_fecha=reg_item.get("lugar_fecha", ""),
+                                    codigo_control=reg_item.get("codigo", ""),
+                                    firmante_izq=f_izq_obj,
+                                    firmante_der=f_der_obj,
+                                    firmas_dir=FIRMAS_DIR,
+                                    config=condec_match.get("config")
+                                )
+                                st.session_state["copia_pdf_bytes"] = pdf_copia
+                                st.session_state["copia_pdf_nombre"] = f"Copia_{reg_item.get('nombre','').replace(' ','_')}_{reg_item.get('codigo','')}.pdf"
+                            else:
+                                st.error("Plantilla PDF no encontrada.")
+                        else:
+                            st.error("No hay plantillas cargadas para regenerar.")
+                with c_act2:
+                    if st.button("🗑️ Borrar", key=f"del_reg_{idx_r}_{reg_item.get('codigo','')}", use_container_width=True):
+                        registro_actual.remove(reg_item)
+                        guardar_registro(registro_actual)
+                        st.success("Registro eliminado.")
+                        st.rerun()
+
+                expected_copy_name = f"Copia_{reg_item.get('nombre','').replace(' ','_')}_{reg_item.get('codigo','')}.pdf"
+                if st.session_state.get("copia_pdf_nombre") == expected_copy_name:
+                    st.download_button(
+                        label=f"📥 Descargar Copia PDF ({reg_item.get('nombre', '')})",
+                        data=st.session_state["copia_pdf_bytes"],
+                        file_name=expected_copy_name,
+                        mime="application/pdf",
+                        key=f"dl_copy_{idx_r}"
+                    )
+                st.divider()
         
-        with st.expander("🗑️ Opciones de Mantenimiento"):
-            if st.button("Limpiar Historial de Pruebas (Borrar todo el registro)"):
+        with st.expander("🗑️ Opciones de Mantenimiento General"):
+            if st.button("Limpiar Historial Completo (Borrar todo el registro)"):
                 guardar_registro([])
                 st.success("Historial reiniciado.")
                 st.rerun()
@@ -811,11 +871,11 @@ with tab4:
                 st.rerun()
 
 # -------------------------------------------------------------------------
-# TAB 5: GESTIÓN DE FORMATOS Y PLANTILLAS (INDIVIDUAL Y POR LOTE)
+# TAB 5: GESTIÓN DE FORMATOS, PLANTILLAS WORD/PDF Y RESPALDO ZIP
 # -------------------------------------------------------------------------
 with tab5:
-    st.subheader("Catálogo de Condecoraciones y Formatos PDF")
-    st.info("Aquí gestionas las plantillas oficiales. Puedes subir archivos individuales o múltiples plantillas a la vez y calibrarlas por lote.")
+    st.subheader("Catálogo de Condecoraciones y Formatos (PDF y Word)")
+    st.info("Puedes subir plantillas limpias en PDF o formatos en Word (.docx); si el Word tiene textos de relleno o ejemplo, la aplicación lo limpiará automáticamente.")
     
     condec_actuales = cargar_condecoraciones()
     
@@ -915,68 +975,133 @@ with tab5:
         
     st.markdown("---")
     
-    st.subheader("➕ Cargar Formatos Oficiales (Individual o por Lote)")
+    st.subheader("➕ Cargar Formatos Oficiales (PDF o Word .docx)")
     tipo_subida = st.radio("Método de subida:", ["Subir un solo formato", "📦 Subir Múltiples Formatos a la vez (Lote)"], horizontal=True)
     
     if tipo_subida == "Subir un solo formato":
         with st.form("form_nueva_condec_ind", clear_on_submit=True):
             nombre_condec = st.text_input("Nombre de la Distinción / Condecoración:", placeholder="ej. Barra Espíritu Scout en Oro")
-            pdf_subido = st.file_uploader("Archivo PDF oficial (Plantilla limpia):", type=["pdf"])
+            archivo_subido = st.file_uploader("Archivo oficial (.pdf o .docx):", type=["pdf", "docx"])
+            textos_limpiar_word = st.text_input(
+                "Si subes un Word (.docx) ya rellenado, indica textos exactos a borrar (opcional, separados por coma):",
+                placeholder="ej. JUAN PEREZ, 12.345.678, Maracaibo 10 de abril"
+            )
             
-            btn_guardar_condec = st.form_submit_button("Guardar Formato", type="primary")
+            btn_guardar_condec = st.form_submit_button("Guardar y Procesar Formato", type="primary")
             if btn_guardar_condec:
-                if not nombre_condec.strip() or not pdf_subido:
-                    st.error("Por favor ingresa el nombre y sube el archivo PDF.")
+                if not nombre_condec.strip() or not archivo_subido:
+                    st.error("Por favor ingresa el nombre y sube el archivo PDF o Word.")
                 else:
-                    nombre_archivo_pdf = f"{nombre_condec.lower().replace(' ', '_')}.pdf"
-                    ruta_destino_pdf = os.path.join(PLANTILLAS_DIR, nombre_archivo_pdf)
-                    with open(ruta_destino_pdf, "wb") as f_out:
-                        f_out.write(pdf_subido.getbuffer())
+                    try:
+                        nombre_archivo_pdf = f"{nombre_condec.lower().replace(' ', '_')}.pdf"
+                        ruta_destino_pdf = os.path.join(PLANTILLAS_DIR, nombre_archivo_pdf)
                         
-                    condec_actuales.append({
-                        "id": nombre_condec.lower().replace(" ", "_"),
-                        "nombre": nombre_condec.strip(),
-                        "archivo_pdf": nombre_archivo_pdf,
-                        "config": DEFAULT_CONFIG.copy()
-                    })
-                    guardar_condecoraciones(condec_actuales)
-                    st.success(f"Condecoración '{nombre_condec}' agregada correctamente.")
-                    st.rerun()
-    else:
-        st.markdown("""
-        Selecciona todos los archivos PDF que quieras cargar a la vez. El sistema usará el nombre del archivo para identificar la condecoración y le aplicará la calibración estándar automáticamente.
-        """)
-        pdfs_multiples = st.file_uploader(
-            "Selecciona múltiples archivos PDF de plantillas oficiales:",
-            type=["pdf"],
-            accept_multiple_files=True
-        )
-        if pdfs_multiples:
-            st.info(f"Se seleccionaron **{len(pdfs_multiples)} archivos** para subir.")
-            if st.button("🚀 Subir y Registrar Todo el Lote de Formatos", type="primary"):
-                agregados = 0
-                for pdf_file in pdfs_multiples:
-                    nombre_base = os.path.splitext(pdf_file.name)[0]
-                    nombre_formateado = nombre_base.replace("_", " ").replace("-", " ").title()
-                    nombre_archivo_pdf = f"{nombre_base.lower().replace(' ', '_')}.pdf"
-                    
-                    ruta_destino_pdf = os.path.join(PLANTILLAS_DIR, nombre_archivo_pdf)
-                    with open(ruta_destino_pdf, "wb") as f_out:
-                        f_out.write(pdf_file.getbuffer())
-                        
-                    existente = next((c for c in condec_actuales if c["archivo_pdf"] == nombre_archivo_pdf), None)
-                    if not existente:
+                        if archivo_subido.name.lower().endswith(".docx"):
+                            lista_borrar = [t.strip() for t in textos_limpiar_word.split(",") if t.strip()]
+                            with st.spinner("Limpiando documento Word y convirtiendo a plantilla PDF oficial..."):
+                                limpiar_y_convertir_docx_a_pdf(archivo_subido.getvalue(), ruta_destino_pdf, lista_borrar)
+                        else:
+                            with open(ruta_destino_pdf, "wb") as f_out:
+                                f_out.write(archivo_subido.getbuffer())
+                            
                         condec_actuales.append({
-                            "id": nombre_base.lower().replace(" ", "_"),
-                            "nombre": nombre_formateado,
+                            "id": nombre_condec.lower().replace(" ", "_"),
+                            "nombre": nombre_condec.strip(),
                             "archivo_pdf": nombre_archivo_pdf,
                             "config": DEFAULT_CONFIG.copy()
                         })
-                        agregados += 1
+                        guardar_condecoraciones(condec_actuales)
+                        st.success(f"Condecoración '{nombre_condec}' procesada y agregada correctamente.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error al procesar el archivo: {e}")
+    else:
+        st.markdown("""
+        Selecciona todos los archivos **PDF o Word (`.docx`)** que quieras cargar a la vez. Los documentos Word serán limpiados y convertidos a PDF automáticamente.
+        """)
+        archivos_multiples = st.file_uploader(
+            "Selecciona múltiples archivos PDF o DOCX:",
+            type=["pdf", "docx"],
+            accept_multiple_files=True
+        )
+        textos_limpiar_lote = st.text_input(
+            "Textos de ejemplo a borrar en los archivos Word (opcional, separados por coma):",
+            placeholder="ej. NOMBRE DEL GALARDONADO, 00.000.000",
+            key="limpiar_word_lote"
+        )
+        if archivos_multiples:
+            st.info(f"Se seleccionaron **{len(archivos_multiples)} archivos** para subir.")
+            if st.button("🚀 Subir, Limpiar y Registrar Todo el Lote", type="primary"):
+                agregados = 0
+                lista_borrar_lote = [t.strip() for t in textos_limpiar_lote.split(",") if t.strip()]
+                with st.spinner("Procesando archivos..."):
+                    for up_file in archivos_multiples:
+                        try:
+                            nombre_base = os.path.splitext(up_file.name)[0]
+                            nombre_formateado = nombre_base.replace("_", " ").replace("-", " ").title()
+                            nombre_archivo_pdf = f"{nombre_base.lower().replace(' ', '_')}.pdf"
+                            ruta_destino_pdf = os.path.join(PLANTILLAS_DIR, nombre_archivo_pdf)
+                            
+                            if up_file.name.lower().endswith(".docx"):
+                                limpiar_y_convertir_docx_a_pdf(up_file.getvalue(), ruta_destino_pdf, lista_borrar_lote)
+                            else:
+                                with open(ruta_destino_pdf, "wb") as f_out:
+                                    f_out.write(up_file.getbuffer())
+                                
+                            existente = next((c for c in condec_actuales if c["archivo_pdf"] == nombre_archivo_pdf), None)
+                            if not existente:
+                                condec_actuales.append({
+                                    "id": nombre_base.lower().replace(" ", "_"),
+                                    "nombre": nombre_formateado,
+                                    "archivo_pdf": nombre_archivo_pdf,
+                                    "config": DEFAULT_CONFIG.copy()
+                                })
+                                agregados += 1
+                        except Exception as e:
+                            st.warning(f"No se pudo procesar '{up_file.name}': {e}")
                         
                 guardar_condecoraciones(condec_actuales)
-                st.success(f"¡Se agregaron con éxito **{agregados} nuevos formatos** al catálogo!")
+                st.success(f"¡Se procesaron y agregaron **{agregados} nuevos formatos** al catálogo!")
                 st.rerun()
+
+    # ---------------------------------------------------------------------
+    # SECCIÓN DE RESPALDO Y RESTAURACIÓN TOTAL EN ZIP
+    # ---------------------------------------------------------------------
+    st.markdown("---")
+    st.subheader("🛡️ Respaldo y Restauración Total del Sistema (ZIP)")
+    st.markdown("""
+    > **Protección para Streamlit Cloud:** Descarga periódicamente una copia de seguridad con todas tus plantillas, firmas digitalizadas, códigos de control y el Libro de Registro oficial. Si el servidor se reinicia, restaura todo en segundos.
+    """)
+    
+    col_resp1, col_resp2 = st.columns(2, gap="large")
+    with col_resp1:
+        st.markdown("#### 1. Exportar Copia de Seguridad")
+        zip_backup = crear_respaldo_sistema_zip(PLANTILLAS_DIR, FIRMAS_DIR, DATOS_DIR)
+        st.download_button(
+            label="📥 Descargar Respaldo Completo (ZIP)",
+            data=zip_backup,
+            file_name=f"Respaldo_Condecoraciones_ASV_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
+            mime="application/zip",
+            type="primary",
+            use_container_width=True
+        )
+        
+    with col_resp2:
+        st.markdown("#### 2. Restaurar desde Respaldo")
+        archivo_zip_restaurar = st.file_uploader("Subir archivo de respaldo (.zip):", type=["zip"], key="upload_zip_backup")
+        if archivo_zip_restaurar:
+            if st.button("📤 Restaurar Respaldo (ZIP) Ahora", type="primary", use_container_width=True):
+                try:
+                    total_restaurados = restaurar_respaldo_sistema_zip(
+                        archivo_zip_restaurar.getvalue(),
+                        PLANTILLAS_DIR,
+                        FIRMAS_DIR,
+                        DATOS_DIR
+                    )
+                    st.success(f"¡Sistema restaurado con éxito! Se recuperaron **{total_restaurados} archivos**.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error al restaurar el respaldo: {e}")
 
 # Pie de página Scout
 st.markdown("""
