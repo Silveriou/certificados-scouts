@@ -1,10 +1,11 @@
 import os
 import json
 import io
+import csv
 import base64
 import importlib
 import streamlit as st
-import pandas as pd
+import openpyxl
 from datetime import datetime, date
 import generator
 importlib.reload(generator)
@@ -113,10 +114,98 @@ def registrar_emision(nombre, cedula, condecoracion, codigo, lugar_fecha, firman
         "firmante_der": firmante_der.get("nombre", "") if firmante_der else "",
         "cargo_der": firmante_der.get("cargo", "") if firmante_der else ""
     }
-    # Evitar duplicados idénticos en la misma sesión
     if not any(r.get("codigo") == nuevo_item["codigo"] and r.get("cedula") == nuevo_item["cedula"] for r in reg):
         reg.insert(0, nuevo_item)
         guardar_registro(reg)
+
+def normalizar_columna(col_nombre: str) -> str:
+    c = str(col_nombre).strip().lower().replace("_", " ")
+    if any(k in c for k in ["nombre", "galardonado", "beneficiario", "scout"]):
+        return "Nombre"
+    if any(k in c for k in ["cedula", "cédula", "ci", "c.i.", "documento", "identidad"]):
+        return "Cedula"
+    if any(k in c for k in ["condecoracion", "condecoración", "distincion", "distinción", "tipo", "premio"]):
+        return "Condecoracion"
+    if any(k in c for k in ["correlativo", "numero", "número", "nro", "num"]):
+        return "Correlativo"
+    return str(col_nombre).strip().title()
+
+def leer_archivo_lote(uploaded_file):
+    """
+    Lee archivos Excel (.xlsx/.xls) o CSV usando librerías ligeras sin requerir pandas.
+    """
+    filas = []
+    fname = uploaded_file.name.lower()
+    
+    if fname.endswith(".csv"):
+        contenido = uploaded_file.getvalue().decode("utf-8", errors="ignore")
+        reader = csv.reader(io.StringIO(contenido))
+        header = next(reader, None)
+        if header:
+            norm_header = [normalizar_columna(h) for h in header]
+            for r in reader:
+                if any(cell.strip() for cell in r):
+                    fila_dict = {}
+                    for i, h in enumerate(norm_header):
+                        fila_dict[h] = r[i].strip() if i < len(r) else ""
+                    filas.append(fila_dict)
+    else:
+        wb = openpyxl.load_workbook(uploaded_file, data_only=True)
+        sheet = wb.active
+        raw_rows = list(sheet.iter_rows(values_only=True))
+        if raw_rows:
+            header = raw_rows[0]
+            norm_header = [normalizar_columna(h) for h in header if h is not None]
+            for r in raw_rows[1:]:
+                if any(cell is not None and str(cell).strip() for cell in r):
+                    fila_dict = {}
+                    for i, h in enumerate(norm_header):
+                        val = r[i] if i < len(r) else ""
+                        fila_dict[h] = str(val).strip() if val is not None else ""
+                    filas.append(fila_dict)
+    return filas
+
+def crear_excel_ejemplo():
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Galardonados"
+    ws.append(["Nombre", "Cedula", "Condecoracion", "Correlativo"])
+    ws.append(["CARLOS ALBERTO ESPINOZA", "33.792.612", "Barra Espíritu Scout en Bronce", 1])
+    ws.append(["MARIA ELENA CHACON", "28.450.119", "Nudo de Servicio en Oro", 2])
+    ws.append(["JOSE LUIS URDANETA", "31.902.833", "Barra de Liderazgo", 3])
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
+
+def exportar_registro_excel(registros):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Libro_Oficial_ASV"
+    headers = [
+        "N° Registro", "Fecha y Hora", "Código de Control", "Condecoración",
+        "Galardonado", "Cédula", "Lugar y Fecha",
+        "Firmante Izquierdo", "Cargo Izq", "Firmante Derecho", "Cargo Der"
+    ]
+    ws.append(headers)
+    for r in registros:
+        ws.append([
+            r.get("id", ""),
+            r.get("fecha_registro", ""),
+            r.get("codigo", ""),
+            r.get("condecoracion", ""),
+            r.get("nombre", ""),
+            r.get("cedula", ""),
+            r.get("lugar_fecha", ""),
+            r.get("firmante_izq", ""),
+            r.get("cargo_izq", ""),
+            r.get("firmante_der", ""),
+            r.get("cargo_der", "")
+        ])
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
 
 # Estilos personalizados Scouts
 logo_b64 = get_base64_image(LOGO_SCOUT_PATH)
@@ -344,7 +433,6 @@ with tab1:
                                 st.session_state["ultimo_pdf"] = pdf_bytes
                                 st.session_state["ultimo_nombre"] = nombre_galardonado.strip().replace(" ", "_")
                                 
-                                # Registrar automáticamente en el Libro de Registro
                                 registrar_emision(
                                     nombre=nombre_galardonado,
                                     cedula=cedula,
@@ -375,24 +463,15 @@ with tab1:
         else:
             st.subheader("⚡ Emisión Masiva de Certificados por Lote")
             st.markdown("""
-            Esta herramienta te permite emitir decenas de condecoraciones a la vez a partir de una lista en Excel.
-            Todos los certificados generados se registrarán automáticamente en el **Libro de Registro Oficial**.
+            Esta herramienta te permite emitir decenas de condecoraciones a la vez a partir de una lista en Excel o CSV.
+            El Excel puede llevar: **Nombre**, **Cédula**, y opcionalmente **Condecoración** y **Correlativo**.
             """)
             
             # Plantilla descargable de Excel
-            df_ejemplo = pd.DataFrame([
-                {"Nombre": "CARLOS ALBERTO ESPINOZA", "Cedula": "33.792.612", "Correlativo": 1},
-                {"Nombre": "MARIA ELENA CHACON", "Cedula": "28.450.119", "Correlativo": 2},
-                {"Nombre": "JOSE LUIS URDANETA", "Cedula": "31.902.833", "Correlativo": 3}
-            ])
-            buf_ejemplo = io.BytesIO()
-            with pd.ExcelWriter(buf_ejemplo, engine="openpyxl") as writer:
-                df_ejemplo.to_excel(writer, index=False, sheet_name="Galardonados")
-            buf_ejemplo.seek(0)
-            
+            buf_ejemplo = crear_excel_ejemplo()
             st.download_button(
                 label="📄 Descargar Plantilla Excel de Ejemplo (.xlsx)",
-                data=buf_ejemplo.getvalue(),
+                data=buf_ejemplo,
                 file_name="plantilla_condecoraciones_scouts.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
@@ -401,9 +480,13 @@ with tab1:
             col_lote_cfg, col_lote_file = st.columns([1, 1], gap="large")
             
             with col_lote_cfg:
-                st.markdown("#### Configuración General del Lote")
+                st.markdown("#### Configuración Predeterminada del Lote")
                 nombres_condec = [c["nombre"] for c in condecoraciones]
-                condec_lote_sel = st.selectbox("Condecoración para todo el Lote:", nombres_condec, key="condec_lote")
+                condec_lote_sel = st.selectbox(
+                    "Condecoración (para filas sin condecoración explícita):",
+                    nombres_condec,
+                    key="condec_lote"
+                )
                 condec_lote_obj = next((c for c in condecoraciones if c["nombre"] == condec_lote_sel), None)
                 
                 col_lf_p, col_lf_t = st.columns(2)
@@ -413,7 +496,6 @@ with tab1:
                     txt_fec_lote = f"Maracaibo, {fec_lote.day} de {MESES_ES[fec_lote.month]} de {fec_lote.year}"
                     lugar_fecha_lote = st.text_input("Lugar y Fecha:", value=txt_fec_lote, key="lf_lote_txt")
                 
-                # Prefijo
                 lista_prefijos = [f"{c['prefijo']} - {c.get('descripcion', '')}" for c in codigos_guardados]
                 pref_lote_sel = st.selectbox("Prefijo Oficial para el Lote:", lista_prefijos, key="pref_lote")
                 prefijo_lote_puro = pref_lote_sel.split(" - ")[0].strip()
@@ -435,78 +517,80 @@ with tab1:
                 
                 if archivo_lote:
                     try:
-                        if archivo_lote.name.endswith(".csv"):
-                            df_subido = pd.read_csv(archivo_lote)
+                        filas_cargadas = leer_archivo_lote(archivo_lote)
+                        if not filas_cargadas:
+                            st.error("No se encontraron filas con datos en el archivo subido.")
                         else:
-                            df_subido = pd.read_excel(archivo_lote)
+                            st.success(f"Archivo cargado: **{len(filas_cargadas)} personas** detectadas.")
+                            st.dataframe(filas_cargadas[:10], use_container_width=True)
                             
-                        # Limpiar nombres de columnas
-                        df_subido.columns = [c.strip().title() for c in df_subido.columns]
-                        st.success(f"Archivo cargado: **{len(df_subido)} personas** detectadas.")
-                        st.dataframe(df_subido.head(10), use_container_width=True)
-                        
-                        btn_procesar_lote = st.button("🚀 Procesar y Generar Lote Completo", type="primary", use_container_width=True)
-                        
-                        if btn_procesar_lote:
-                            if not condec_lote_obj:
-                                st.error("Seleccione una condecoración válida.")
-                            else:
-                                ruta_template = os.path.join(PLANTILLAS_DIR, condec_lote_obj["archivo_pdf"])
-                                if not os.path.exists(ruta_template):
-                                    st.error(f"Plantilla '{condec_lote_obj['archivo_pdf']}' no encontrada.")
-                                else:
-                                    progreso = st.progress(0)
-                                    status_txt = st.empty()
+                            btn_procesar_lote = st.button("🚀 Procesar y Generar Lote Completo", type="primary", use_container_width=True)
+                            
+                            if btn_procesar_lote:
+                                progreso = st.progress(0)
+                                status_txt = st.empty()
+                                
+                                lista_pdfs_bytes = []
+                                lista_para_zip = []
+                                ano_str = str(fec_lote.year)
+                                mes_str = f"{fec_lote.month:02d}"
+                                total_filas = len(filas_cargadas)
+                                
+                                for i, row in enumerate(filas_cargadas):
+                                    status_txt.text(f"Generando certificado {i+1} de {total_filas}...")
+                                    nom_persona = str(row.get("Nombre", "")).strip().upper()
+                                    ced_persona = str(row.get("Cedula", "")).strip()
                                     
-                                    lista_pdfs_bytes = []
-                                    lista_para_zip = []
-                                    ano_str = str(fec_lote.year)
-                                    mes_str = f"{fec_lote.month:02d}"
+                                    # Determinar condecoración para esta fila
+                                    condec_fila_nombre = str(row.get("Condecoracion", "")).strip()
+                                    target_condec = None
+                                    if condec_fila_nombre:
+                                        # Buscar coincidencia
+                                        target_condec = next((c for c in condecoraciones if condec_fila_nombre.lower() in c["nombre"].lower()), None)
+                                    if not target_condec:
+                                        target_condec = condec_lote_obj
+                                        
+                                    ruta_template = os.path.join(PLANTILLAS_DIR, target_condec["archivo_pdf"])
+                                    if not os.path.exists(ruta_template):
+                                        st.warning(f"Plantilla '{target_condec['archivo_pdf']}' no encontrada para {nom_persona}. Saltando...")
+                                        continue
+                                        
+                                    # Correlativo
+                                    num_corr = row.get("Correlativo", i + 1)
+                                    try:
+                                        num_corr_int = int(num_corr)
+                                    except:
+                                        num_corr_int = i + 1
+                                    cod_armado = f"{prefijo_lote_puro}-{ano_str}-{mes_str}-{num_corr_int:03d}"
                                     
-                                    total_filas = len(df_subido)
-                                    for i, row in df_subido.iterrows():
-                                        status_txt.text(f"Generando certificado {i+1} de {total_filas}...")
-                                        nom_persona = str(row.get("Nombre", "")).strip().upper()
-                                        ced_persona = str(row.get("Cedula", "")).strip()
-                                        
-                                        # Correlativo
-                                        num_corr = row.get("Correlativo", i + 1)
-                                        try:
-                                            num_corr_int = int(num_corr)
-                                        except:
-                                            num_corr_int = i + 1
-                                        cod_armado = f"{prefijo_lote_puro}-{ano_str}-{mes_str}-{num_corr_int:03d}"
-                                        
-                                        pdf_ind = generar_certificado_pdf(
-                                            template_path=ruta_template,
-                                            nombre=nom_persona,
-                                            cedula=ced_persona,
-                                            lugar_fecha=lugar_fecha_lote,
-                                            codigo_control=cod_armado,
-                                            firmante_izq=firm_lote_izq,
-                                            firmante_der=firm_lote_der,
-                                            firmas_dir=FIRMAS_DIR,
-                                            config=condec_lote_obj.get("config")
-                                        )
-                                        lista_pdfs_bytes.append(pdf_ind)
-                                        nombre_archivo_ind = f"Certificado_{num_corr_int:03d}_{nom_persona.replace(' ', '_')}.pdf"
-                                        lista_para_zip.append((nombre_archivo_ind, pdf_ind))
-                                        
-                                        # Registrar en el libro de registro
-                                        registrar_emision(
-                                            nombre=nom_persona,
-                                            cedula=ced_persona,
-                                            condecoracion=condec_lote_obj["nombre"],
-                                            codigo=cod_armado,
-                                            lugar_fecha=lugar_fecha_lote,
-                                            firmante_izq=firm_lote_izq,
-                                            firmante_der=firm_lote_der
-                                        )
-                                        progreso.progress((i + 1) / total_filas)
-                                        
-                                    status_txt.success(f"¡{total_filas} certificados generados con éxito!")
+                                    pdf_ind = generar_certificado_pdf(
+                                        template_path=ruta_template,
+                                        nombre=nom_persona,
+                                        cedula=ced_persona,
+                                        lugar_fecha=lugar_fecha_lote,
+                                        codigo_control=cod_armado,
+                                        firmante_izq=firm_lote_izq,
+                                        firmante_der=firm_lote_der,
+                                        firmas_dir=FIRMAS_DIR,
+                                        config=target_condec.get("config")
+                                    )
+                                    lista_pdfs_bytes.append(pdf_ind)
+                                    nombre_archivo_ind = f"Certificado_{num_corr_int:03d}_{nom_persona.replace(' ', '_')}.pdf"
+                                    lista_para_zip.append((nombre_archivo_ind, pdf_ind))
                                     
-                                    # Generar PDF consolidado único
+                                    registrar_emision(
+                                        nombre=nom_persona,
+                                        cedula=ced_persona,
+                                        condecoracion=target_condec["nombre"],
+                                        codigo=cod_armado,
+                                        lugar_fecha=lugar_fecha_lote,
+                                        firmante_izq=firm_lote_izq,
+                                        firmante_der=firm_lote_der
+                                    )
+                                    progreso.progress((i + 1) / total_filas)
+                                    
+                                if lista_pdfs_bytes:
+                                    status_txt.success(f"¡{len(lista_pdfs_bytes)} certificados generados con éxito!")
                                     pdf_unificado = unir_certificados_pdf(lista_pdfs_bytes)
                                     zip_individuales = crear_zip_certificados(lista_para_zip)
                                     
@@ -515,9 +599,9 @@ with tab1:
                                     col_d1, col_d2 = st.columns(2)
                                     with col_d1:
                                         st.download_button(
-                                            label=f"📄 Descargar Todo en 1 Solo PDF ({total_filas} páginas)",
+                                            label=f"📄 Descargar Todo en 1 Solo PDF ({len(lista_pdfs_bytes)} páginas)",
                                             data=pdf_unificado,
-                                            file_name=f"Lote_{condec_lote_obj['id']}_{fec_lote.strftime('%Y%m%d')}.pdf",
+                                            file_name=f"Lote_Condecoraciones_{fec_lote.strftime('%Y%m%d')}.pdf",
                                             mime="application/pdf",
                                             type="primary",
                                             use_container_width=True
@@ -526,7 +610,7 @@ with tab1:
                                         st.download_button(
                                             label=f"📦 Descargar Archivo ZIP (PDFs individuales)",
                                             data=zip_individuales,
-                                            file_name=f"Lote_{condec_lote_obj['id']}_{fec_lote.strftime('%Y%m%d')}.zip",
+                                            file_name=f"Lote_Condecoraciones_{fec_lote.strftime('%Y%m%d')}.zip",
                                             mime="application/zip",
                                             use_container_width=True
                                         )
@@ -545,48 +629,41 @@ with tab2:
     registro_actual = cargar_registro()
     
     if registro_actual:
-        df_reg = pd.DataFrame(registro_actual)
-        
-        # Métricas
         m1, m2, m3 = st.columns(3)
-        m1.metric("Total Condecoraciones Emitidas", len(df_reg))
-        m2.metric("Última Emisión", df_reg.iloc[0]["fecha_registro"][:10] if not df_reg.empty else "-")
-        m3.metric("Condecoraciones Diferentes", df_reg["condecoracion"].nunique() if not df_reg.empty else 0)
+        m1.metric("Total Condecoraciones Emitidas", len(registro_actual))
+        m2.metric("Última Emisión", registro_actual[0]["fecha_registro"][:10] if registro_actual else "-")
+        condec_unicas = len(set(r.get("condecoracion", "") for r in registro_actual))
+        m3.metric("Condecoraciones Diferentes", condec_unicas)
         
         st.markdown("---")
         
-        # Filtros de búsqueda
         col_filtro, col_exp = st.columns([3, 1])
         with col_filtro:
             texto_busqueda = st.text_input("🔍 Buscar por Nombre, Cédula o Código de Registro:", placeholder="ej. Silverio, 11.289.602, NPB...")
         with col_exp:
-            # Exportar a Excel
-            buf_excel = io.BytesIO()
-            with pd.ExcelWriter(buf_excel, engine="openpyxl") as writer:
-                df_reg.to_excel(writer, index=False, sheet_name="Libro_Oficial")
-            buf_excel.seek(0)
+            buf_excel = exportar_registro_excel(registro_actual)
             st.download_button(
                 label="📥 Exportar a Excel (.xlsx)",
-                data=buf_excel.getvalue(),
+                data=buf_excel,
                 file_name=f"Libro_Registro_Condecoraciones_ASV_{datetime.now().strftime('%Y%m%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 type="primary",
                 use_container_width=True
             )
             
-        # Filtrado
         if texto_busqueda.strip():
             filtro = texto_busqueda.strip().lower()
-            df_mostrar = df_reg[
-                df_reg["nombre"].str.lower().str.contains(filtro) |
-                df_reg["cedula"].str.lower().str.contains(filtro) |
-                df_reg["codigo"].str.lower().str.contains(filtro) |
-                df_reg["condecoracion"].str.lower().str.contains(filtro)
+            mostrar = [
+                r for r in registro_actual
+                if filtro in r.get("nombre", "").lower()
+                or filtro in r.get("cedula", "").lower()
+                or filtro in r.get("codigo", "").lower()
+                or filtro in r.get("condecoracion", "").lower()
             ]
         else:
-            df_mostrar = df_reg
+            mostrar = registro_actual
             
-        st.dataframe(df_mostrar, use_container_width=True, hide_index=True)
+        st.dataframe(mostrar, use_container_width=True, hide_index=True)
         
         with st.expander("🗑️ Opciones de Mantenimiento"):
             if st.button("Limpiar Historial de Pruebas (Borrar todo el registro)"):
@@ -742,7 +819,6 @@ with tab5:
     
     condec_actuales = cargar_condecoraciones()
     
-    # 1. ACCIÓN MASIVA: CALIBRACIÓN POR LOTE
     if len(condec_actuales) > 1:
         with st.expander("⚙️ Calibración por Lote (Copiar coordenadas a múltiples formatos)"):
             st.markdown("""
@@ -750,18 +826,10 @@ with tab5:
             """)
             col_m1, col_m2 = st.columns([1, 2])
             with col_m1:
-                formato_modelo = st.selectbox(
-                    "Copiar calibración DESDE:",
-                    [c["nombre"] for c in condec_actuales],
-                    key="modelo_lote"
-                )
+                formato_modelo = st.selectbox("Copiar calibración DESDE:", [c["nombre"] for c in condec_actuales], key="modelo_lote")
                 formato_modelo_obj = next((c for c in condec_actuales if c["nombre"] == formato_modelo), None)
             with col_m2:
-                formatos_destino = st.multiselect(
-                    "Aplicar esta calibración HACIA los siguientes formatos:",
-                    [c["nombre"] for c in condec_actuales if c["nombre"] != formato_modelo],
-                    key="destinos_lote"
-                )
+                formatos_destino = st.multiselect("Aplicar esta calibración HACIA los siguientes formatos:", [c["nombre"] for c in condec_actuales if c["nombre"] != formato_modelo], key="destinos_lote")
             
             if st.button("🚀 Aplicar Calibración a los Formatos Seleccionados", type="primary"):
                 if formato_modelo_obj and formatos_destino:
@@ -777,7 +845,6 @@ with tab5:
     
     st.markdown("---")
     
-    # 2. LISTA DE FORMATOS REGISTRADOS
     if condec_actuales:
         st.markdown(f"### Formatos Oficiales Registrados ({len(condec_actuales)})")
         for idx, c in enumerate(condec_actuales):
@@ -848,9 +915,7 @@ with tab5:
         
     st.markdown("---")
     
-    # 3. SUBIDA DE FORMATOS (INDIVIDUAL O POR LOTE)
     st.subheader("➕ Cargar Formatos Oficiales (Individual o por Lote)")
-    
     tipo_subida = st.radio("Método de subida:", ["Subir un solo formato", "📦 Subir Múltiples Formatos a la vez (Lote)"], horizontal=True)
     
     if tipo_subida == "Subir un solo formato":
@@ -892,7 +957,6 @@ with tab5:
                 agregados = 0
                 for pdf_file in pdfs_multiples:
                     nombre_base = os.path.splitext(pdf_file.name)[0]
-                    # Limpiar nombre
                     nombre_formateado = nombre_base.replace("_", " ").replace("-", " ").title()
                     nombre_archivo_pdf = f"{nombre_base.lower().replace(' ', '_')}.pdf"
                     
@@ -900,7 +964,6 @@ with tab5:
                     with open(ruta_destino_pdf, "wb") as f_out:
                         f_out.write(pdf_file.getbuffer())
                         
-                    # Verificar si ya existe
                     existente = next((c for c in condec_actuales if c["archivo_pdf"] == nombre_archivo_pdf), None)
                     if not existente:
                         condec_actuales.append({
