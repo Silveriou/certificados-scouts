@@ -1,5 +1,9 @@
 import io
 import os
+import re
+import shutil
+import subprocess
+import tempfile
 import zipfile
 from reportlab.pdfgen import canvas
 from reportlab.pdfbase.pdfmetrics import stringWidth
@@ -7,6 +11,7 @@ import pypdf
 import pymupdf
 from PIL import Image
 import numpy as np
+import docx
 
 DEFAULT_CONFIG = {
     "nombre_y": 467.0,
@@ -25,6 +30,18 @@ DEFAULT_CONFIG = {
     "firmante_der_y": 138.0,
     "ancho_firma": 135.0
 }
+
+def formatear_cedula_vzla(cedula_raw: str) -> str:
+    """
+    Formatea cualquier número de cédula venezolana con sus puntos reglamentarios.
+    Ej: '11289602' o 'V-11.289.602' -> '11.289.602'
+    """
+    if not cedula_raw:
+        return ""
+    solo_digitos = re.sub(r"\D", "", str(cedula_raw))
+    if not solo_digitos:
+        return str(cedula_raw).replace("V-", "").replace("v-", "").replace("C.I.", "").strip()
+    return f"{int(solo_digitos):,}".replace(",", ".")
 
 def recortar_tinta_firma(ruta_imagen: str) -> str:
     """
@@ -103,8 +120,8 @@ def generar_certificado_pdf(
     c.setFillColorRGB(0.1, 0.1, 0.1)
     c.drawCentredString(centro_x, cfg.get("nombre_y", 467.0), nombre_txt)
     
-    # 2. Cédula de Identidad
-    cedula_limpia = cedula.replace("V-", "").replace("v-", "").replace("C.I.", "").strip()
+    # 2. Cédula de Identidad (Formateada automáticamente con puntos)
+    cedula_limpia = formatear_cedula_vzla(cedula)
     c.setFont("Helvetica-Bold", cfg.get("cedula_tamano", 16.5))
     c.drawString(cfg.get("cedula_x", 257.0), cfg.get("cedula_y", 435.1), cedula_limpia)
     
@@ -224,3 +241,141 @@ def pdf_to_image_bytes(pdf_bytes: bytes) -> bytes:
     page = doc[0]
     pix = page.get_pixmap(dpi=150)
     return pix.tobytes("png")
+
+# -------------------------------------------------------------------------
+# PROCESAMIENTO Y LIMPIEZA DE PLANTILLAS WORD (.DOCX)
+# -------------------------------------------------------------------------
+def _limpiar_parrafo_docx(paragraph, textos_extra_borrar: list):
+    """
+    Limpia marcadores de relleno, corchetes, llaves o textos de ejemplo
+    manteniendo los estilos y el diseño intactos.
+    """
+    patrones_regex = [
+        r"\{\{.*?\}\}",   # {{nombre}}, {{cedula}}
+        r"\[.*?\]",         # [Nombre del Galardonado]
+        r"<.*?>",             # <Nombre>
+        r"_{4,}",             # Líneas de subrayado ______
+        r"\.{5,}",           # Líneas de puntos ........
+    ]
+    
+    for run in paragraph.runs:
+        txt = run.text
+        if not txt:
+            continue
+        for pat in patrones_regex:
+            txt = re.sub(pat, " ", txt)
+        for extra in textos_extra_borrar:
+            if extra and extra.strip():
+                txt = re.sub(re.escape(extra.strip()), " ", txt, flags=re.IGNORECASE)
+        run.text = txt
+
+def limpiar_y_convertir_docx_a_pdf(docx_bytes: bytes, ruta_pdf_salida: str, textos_extra_borrar: list = None):
+    """
+    1. Abre el .docx en memoria y elimina textos rellenados o marcadores.
+    2. Convierte el documento limpio a PDF usando docx2pdf (Windows/Mac) o LibreOffice (Linux/Cloud).
+    """
+    if textos_extra_borrar is None:
+        textos_extra_borrar = []
+
+    doc = docx.Document(io.BytesIO(docx_bytes))
+
+    # Limpiar párrafos principales
+    for p in doc.paragraphs:
+        _limpiar_parrafo_docx(p, textos_extra_borrar)
+
+    # Limpiar celdas de tablas (muy común en diseños de certificados Word)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    _limpiar_parrafo_docx(p, textos_extra_borrar)
+
+    # Limpiar encabezados y pies de página
+    for section in doc.sections:
+        for p in section.header.paragraphs:
+            _limpiar_parrafo_docx(p, textos_extra_borrar)
+        for p in section.footer.paragraphs:
+            _limpiar_parrafo_docx(p, textos_extra_borrar)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        temp_docx = os.path.join(tmpdir, "plantilla_limpia.docx")
+        temp_pdf = os.path.join(tmpdir, "plantilla_limpia.pdf")
+        doc.save(temp_docx)
+
+        convertido = False
+        # Intento 1: LibreOffice (ideal para Streamlit Cloud / Linux o si está instalado en Windows)
+        soffice_bin = shutil.which("soffice") or shutil.which("libreoffice")
+        if soffice_bin:
+            subprocess.run(
+                [soffice_bin, "--headless", "--convert-to", "pdf", "--outdir", tmpdir, temp_docx],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            if os.path.exists(temp_pdf):
+                shutil.copy(temp_pdf, ruta_pdf_salida)
+                convertido = True
+
+        # Intento 2: docx2pdf (ideal en PC local con Microsoft Word instalado)
+        if not convertido:
+            try:
+                import pythoncom
+                pythoncom.CoInitialize()
+            except Exception:
+                pass
+            from docx2pdf import convert
+            convert(temp_docx, ruta_pdf_salida)
+            if os.path.exists(ruta_pdf_salida):
+                convertido = True
+
+        if not convertido:
+            raise RuntimeError("No se encontró LibreOffice ni Microsoft Word para convertir el archivo .docx a PDF.")
+
+# -------------------------------------------------------------------------
+# SISTEMA DE RESPALDO Y RESTAURACIÓN EN ZIP
+# -------------------------------------------------------------------------
+def crear_respaldo_sistema_zip(plantillas_dir: str, firmas_dir: str, datos_dir: str) -> bytes:
+    """
+    Empaqueta todas las carpetas críticas (plantillas, firmas, datos) en un ZIP.
+    """
+    buf = io.BytesIO()
+    carpetas = {
+        "plantillas": plantillas_dir,
+        "firmas": firmas_dir,
+        "datos": datos_dir
+    }
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for nombre_carpeta, ruta_local in carpetas.items():
+            if os.path.exists(ruta_local):
+                for root, _, files in os.walk(ruta_local):
+                    for file in files:
+                        if file.startswith("_temp_"):
+                            continue
+                        full_path = os.path.join(root, file)
+                        rel_path = os.path.relpath(full_path, ruta_local)
+                        z.write(full_path, os.path.join(nombre_carpeta, rel_path))
+    buf.seek(0)
+    return buf.getvalue()
+
+def restaurar_respaldo_sistema_zip(zip_bytes: bytes, plantillas_dir: str, firmas_dir: str, datos_dir: str) -> int:
+    """
+    Restaura las carpetas plantillas, firmas y datos desde un archivo ZIP de respaldo.
+    """
+    destinos = {
+        "plantillas": plantillas_dir,
+        "firmas": firmas_dir,
+        "datos": datos_dir
+    }
+    archivos_restaurados = 0
+    with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as z:
+        for member in z.namelist():
+            partes = member.replace("\\", "/").split("/")
+            if len(partes) >= 2 and partes[0] in destinos and partes[-1]:
+                carpeta_destino = destinos[partes[0]]
+                nombre_archivo = "/".join(partes[1:])
+                ruta_final = os.path.join(carpeta_destino, nombre_archivo)
+                os.makedirs(os.path.dirname(ruta_final), exist_ok=True)
+                with z.open(member) as source, open(ruta_final, "wb") as target:
+                    shutil.copyfileobj(source, target)
+                archivos_restaurados += 1
+    return archivos_restaurados
