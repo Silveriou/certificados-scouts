@@ -12,5 +12,12 @@
     "cargo": "SUB JEFE DE GRUPO",
     "entidad": "Asociación de Scouts de Venezuela",
     "archivo_firma": "silverio_urdaneta.png"
+  },
+  {
+    "id": "cesar_rangel",
+    "nombre": "Cesar Rangel",
+    "cargo": "Comisionado de Distrito",
+    "entidad": "Asociación de Scouts de Venezuela",
+    "archivo_firma": "cesar_rangel_firmacesar.png"
   }
 ]

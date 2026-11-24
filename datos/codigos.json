@@ -14,5 +14,13 @@
     "siglas": "BEB",
     "prefijo": "COQ-LCP-BEB",
     "descripcion": "Barra Espíritu Scout en Bronce"
+  },
+  {
+    "id": "coq_lcp_npp",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "NPP",
+    "prefijo": "COQ-LCP-NPP",
+    "descripcion": "Nudo de Perseverancia en Plata"
   }
 ]
