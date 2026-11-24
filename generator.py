@@ -1,5 +1,6 @@
 import io
 import os
+import zipfile
 from reportlab.pdfgen import canvas
 from reportlab.pdfbase.pdfmetrics import stringWidth
 import pypdf
@@ -84,7 +85,6 @@ def generar_certificado_pdf(
     if config:
         cfg.update(config)
 
-    # Detectar dimensiones reales del PDF base (sea vertical u horizontal)
     base_pdf = pypdf.PdfReader(template_path)
     base_page = base_pdf.pages[0]
     page_w = float(base_page.mediabox.width)
@@ -184,7 +184,6 @@ def generar_certificado_pdf(
     c.save()
     packet.seek(0)
     
-    # Mezclar con el PDF original
     writer = pypdf.PdfWriter(clone_from=template_path)
     overlay_pdf = pypdf.PdfReader(packet)
     writer.pages[0].merge_page(overlay_pdf.pages[0])
@@ -193,6 +192,32 @@ def generar_certificado_pdf(
     writer.write(output)
     output.seek(0)
     return output.getvalue()
+
+def unir_certificados_pdf(lista_pdf_bytes: list) -> bytes:
+    """
+    Une múltiples certificados PDF en un único archivo PDF continuo
+    listo para imprimir en lote.
+    """
+    writer = pypdf.PdfWriter()
+    for b in lista_pdf_bytes:
+        reader = pypdf.PdfReader(io.BytesIO(b))
+        writer.add_page(reader.pages[0])
+    out = io.BytesIO()
+    writer.write(out)
+    out.seek(0)
+    return out.getvalue()
+
+def crear_zip_certificados(lista_certificados: list) -> bytes:
+    """
+    Empaqueta múltiples certificados PDF individuales en un archivo ZIP.
+    lista_certificados: lista de tuplas (nombre_archivo.pdf, bytes)
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for fname, data in lista_certificados:
+            z.writestr(fname, data)
+    buf.seek(0)
+    return buf.getvalue()
 
 def pdf_to_image_bytes(pdf_bytes: bytes) -> bytes:
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
