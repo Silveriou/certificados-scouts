@@ -1,7 +1,10 @@
 import os
 import json
+import importlib
 import streamlit as st
 from datetime import datetime
+import generator
+importlib.reload(generator)
 from generator import generar_certificado_pdf, pdf_to_image_bytes
 
 # Configuración de página
@@ -71,7 +74,6 @@ with tab1:
         with col_form:
             st.subheader("Datos de la Condecoración")
             
-            # Selector de condecoración
             nombres_condec = [c["nombre"] for c in condecoraciones]
             condec_seleccionada = st.selectbox("Seleccione la Condecoración / Formato:", nombres_condec)
             condec_obj = next((c for c in condecoraciones if c["nombre"] == condec_seleccionada), None)
@@ -81,26 +83,26 @@ with tab1:
             
             nombre_galardonado = st.text_input(
                 "Nombre y Apellido:",
-                value="Carlos Espinoza Nava",
-                help="Se imprimirá en mayúsculas sobre la línea oficial del formato"
+                value="SILVERIO A. URDANETA S.",
+                help="Se imprimirá en mayúsculas ocupando aproximadamente el 90% de la línea oficial"
             )
             
             cedula = st.text_input(
                 "Cédula de Identidad:",
-                value="33.792.612",
-                help="Coloque el número (ej: 33.792.612). El prefijo C.I. V- ya está impreso en el formato."
+                value="11.289.602",
+                help="Coloque el número (ej: 11.289.602). El prefijo C.I. V- ya está impreso en el formato."
             )
             
             col_fec, col_cod = st.columns(2)
             with col_fec:
                 lugar_fecha = st.text_input(
                     "Lugar y Fecha:",
-                    value=f"Maracaibo, {datetime.now().day} de abril de {datetime.now().year}"
+                    value="Maracaibo, 24 de abril de 2026"
                 )
             with col_cod:
                 codigo_control = st.text_input(
                     "Código de Registro / Control:",
-                    value=f"COQ-LCP-NPB-{datetime.now().year}-04-001"
+                    value="COQ-LCP-NPB-2026-04-001"
                 )
                 
             st.markdown("---")
@@ -130,7 +132,6 @@ with tab1:
         with col_prev:
             st.subheader("Vista Previa y Descarga")
             
-            # Generar por defecto o al hacer clic
             if btn_generar or "ultimo_pdf" not in st.session_state:
                 if condec_obj and nombre_galardonado.strip():
                     ruta_template = os.path.join(PLANTILLAS_DIR, condec_obj["archivo_pdf"])
@@ -152,7 +153,6 @@ with tab1:
                         st.error(f"El archivo de plantilla '{condec_obj['archivo_pdf']}' no existe en el disco.")
             
             if "ultimo_pdf" in st.session_state:
-                # Renderizar preview
                 img_preview = pdf_to_image_bytes(st.session_state["ultimo_pdf"])
                 st.image(img_preview, caption="Vista previa del certificado generado", use_container_width=True)
                 
