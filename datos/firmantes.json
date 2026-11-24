@@ -1,0 +1,16 @@
+[
+  {
+    "id": "carmen_chacon",
+    "nombre": "Carmen Chacón",
+    "cargo": "JEFE DE GRUPO",
+    "entidad": "Asociación de Scouts de Venezuela",
+    "archivo_firma": "carmen_chacon.png"
+  },
+  {
+    "id": "silverio_urdaneta",
+    "nombre": "Silverio Urdaneta",
+    "cargo": "SUB JEFE DE GRUPO",
+    "entidad": "Asociación de Scouts de Venezuela",
+    "archivo_firma": "silverio_urdaneta.png"
+  }
+]
