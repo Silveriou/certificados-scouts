@@ -1,0 +1,18 @@
+[
+  {
+    "id": "coq_lcp_npb",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "NPB",
+    "prefijo": "COQ-LCP-NPB",
+    "descripcion": "Nudo de Perseverancia en Bronce"
+  },
+  {
+    "id": "coq_lcp_beb",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "BEB",
+    "prefijo": "COQ-LCP-BEB",
+    "descripcion": "Barra Espíritu Scout en Bronce"
+  }
+]

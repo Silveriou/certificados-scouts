@@ -2,7 +2,7 @@ import os
 import json
 import importlib
 import streamlit as st
-from datetime import datetime
+from datetime import datetime, date
 import generator
 importlib.reload(generator)
 from generator import generar_certificado_pdf, pdf_to_image_bytes, DEFAULT_CONFIG
@@ -13,6 +13,13 @@ st.set_page_config(
     page_icon="⚜️",
     layout="wide"
 )
+
+# Nombres de meses en español
+MESES_ES = {
+    1: "enero", 2: "febrero", 3: "marzo", 4: "abril",
+    5: "mayo", 6: "junio", 7: "julio", 8: "agosto",
+    9: "septiembre", 10: "octubre", 11: "noviembre", 12: "diciembre"
+}
 
 # Rutas base
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -26,6 +33,7 @@ for d in [PLANTILLAS_DIR, FIRMAS_DIR, DATOS_DIR, GENERADOS_DIR]:
 
 FIRMANTES_FILE = os.path.join(DATOS_DIR, "firmantes.json")
 CONDECORACIONES_FILE = os.path.join(DATOS_DIR, "condecoraciones.json")
+CODIGOS_FILE = os.path.join(DATOS_DIR, "codigos.json")
 
 def cargar_firmantes():
     if os.path.exists(FIRMANTES_FILE):
@@ -41,7 +49,6 @@ def cargar_condecoraciones():
     if os.path.exists(CONDECORACIONES_FILE):
         with open(CONDECORACIONES_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            # Asegurar que cada condecoración tenga su diccionario de config
             for item in data:
                 if "config" not in item:
                     item["config"] = DEFAULT_CONFIG.copy()
@@ -52,12 +59,23 @@ def guardar_condecoraciones(condec):
     with open(CONDECORACIONES_FILE, "w", encoding="utf-8") as f:
         json.dump(condec, f, indent=2, ensure_ascii=False)
 
+def cargar_codigos():
+    if os.path.exists(CODIGOS_FILE):
+        with open(CODIGOS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
+
+def guardar_codigos(codigos):
+    with open(CODIGOS_FILE, "w", encoding="utf-8") as f:
+        json.dump(codigos, f, indent=2, ensure_ascii=False)
+
 # Encabezado
 st.title("⚜️ Sistema de Emisión de Condecoraciones")
 st.caption("Generación oficial de certificados y distinciones en alta fidelidad")
 
-tab1, tab2, tab3 = st.tabs([
+tab1, tab2, tab3, tab4 = st.tabs([
     "📜 Emitir Certificado",
+    "🏷️ Códigos de Control",
     "✍️ Gestión de Firmantes",
     "📁 Formatos y Plantillas"
 ])
@@ -68,6 +86,7 @@ tab1, tab2, tab3 = st.tabs([
 with tab1:
     condecoraciones = cargar_condecoraciones()
     firmantes = cargar_firmantes()
+    codigos_guardados = cargar_codigos()
     
     if not condecoraciones:
         st.warning("No hay formatos de condecoración cargados. Por favor ve a la pestaña 'Formatos y Plantillas' para agregar uno.")
@@ -77,14 +96,11 @@ with tab1:
         col_form, col_prev = st.columns([1, 1], gap="large")
         
         with col_form:
-            st.subheader("Datos de la Condecoración")
+            st.subheader("1. Condecoración y Galardonado")
             
             nombres_condec = [c["nombre"] for c in condecoraciones]
             condec_seleccionada = st.selectbox("Seleccione la Condecoración / Formato:", nombres_condec)
             condec_obj = next((c for c in condecoraciones if c["nombre"] == condec_seleccionada), None)
-            
-            st.markdown("---")
-            st.subheader("Datos del Galardonado")
             
             nombre_galardonado = st.text_input(
                 "Nombre y Apellido:",
@@ -98,23 +114,47 @@ with tab1:
                 help="Coloque el número (ej: 11.289.602). El prefijo C.I. V- ya está impreso en el formato."
             )
             
-            col_fec, col_cod = st.columns(2)
-            with col_fec:
-                lugar_fecha = st.text_input(
-                    "Lugar y Fecha:",
-                    value="Maracaibo, 24 de abril de 2026"
+            st.markdown("---")
+            st.subheader("2. Fecha y Código de Registro")
+            
+            col_fec_pick, col_fec_txt = st.columns(2)
+            with col_fec_pick:
+                fecha_seleccionada = st.date_input(
+                    "Seleccione la fecha:",
+                    value=date(2026, 4, 24)
                 )
-            with col_cod:
-                codigo_control = st.text_input(
-                    "Código de Registro / Control:",
-                    value="COQ-LCP-NPB-2026-04-001"
-                )
+            with col_fec_txt:
+                texto_fecha_auto = f"Maracaibo, {fecha_seleccionada.day} de {MESES_ES[fecha_seleccionada.month]} de {fecha_seleccionada.year}"
+                lugar_fecha = st.text_input("Lugar y Fecha en el Certificado:", value=texto_fecha_auto)
+            
+            # Construcción dinámica del Código
+            st.markdown("**Código de Registro / Control:**")
+            col_pref, col_corr = st.columns([2, 1])
+            
+            with col_pref:
+                lista_prefijos = [f"{c['prefijo']} ({c.get('descripcion', '')})" for c in codigos_guardados]
+                if not lista_prefijos:
+                    lista_prefijos = ["COQ-LCP-NPB (Nudo de Perseverancia en Bronce)"]
+                
+                pref_sel = st.selectbox("Prefijo (Distrito-Grupo-Siglas):", lista_prefijos)
+                prefijo_puro = pref_sel.split(" ")[0].strip()
+                
+            with col_corr:
+                correlativo = st.number_input("N° Correlativo:", min_value=1, max_value=999, value=1, step=1)
+                
+            # Ensamblado automático: PREFIJO-AÑO-MES-CORRELATIVO
+            ano_str = str(fecha_seleccionada.year)
+            mes_str = f"{fecha_seleccionada.month:02d}"
+            num_str = f"{correlativo:03d}"
+            codigo_armado = f"{prefijo_puro}-{ano_str}-{mes_str}-{num_str}"
+            
+            codigo_control_final = st.text_input("Código de Control Final (editable):", value=codigo_armado)
+            st.caption(f"Estructura: `{prefijo_puro}` (3 partes) + `{ano_str}` (Año) + `{mes_str}` (Mes) + `{num_str}` (Correlativo)")
                 
             st.markdown("---")
-            st.subheader("Firmantes Oficiales")
+            st.subheader("3. Firmantes Oficiales")
             
             nombres_firmantes = ["(Ninguno)"] + [f["nombre"] for f in firmantes]
-            
             col_izq, col_der = st.columns(2)
             with col_izq:
                 firmante_izq_nombre = st.selectbox(
@@ -147,7 +187,7 @@ with tab1:
                                 nombre=nombre_galardonado,
                                 cedula=cedula,
                                 lugar_fecha=lugar_fecha,
-                                codigo_control=codigo_control,
+                                codigo_control=codigo_control_final,
                                 firmante_izq=firmante_izq_obj,
                                 firmante_der=firmante_der_obj,
                                 firmas_dir=FIRMAS_DIR,
@@ -173,9 +213,76 @@ with tab1:
                 )
 
 # -------------------------------------------------------------------------
-# TAB 2: GESTIÓN DE FIRMANTES
+# TAB 2: CÓDIGOS DE CONTROL
 # -------------------------------------------------------------------------
 with tab2:
+    st.subheader("Configuración de Prefijos para Códigos de Control")
+    st.markdown("""
+    Los códigos oficiales se arman con la siguiente estructura:
+    - **Parte 1 (Distrito):** ej. `COQ`
+    - **Parte 2 (Grupo Scout):** ej. `LCP`
+    - **Parte 3 (Siglas de Condecoración):** ej. `NPB` (Nudo de Perseverancia en Bronce)
+    - **Parte 4 y 5 (Año y Mes):** Se toman automáticamente de la fecha del certificado (ej. `2026-04`)
+    - **Parte 6 (Correlativo):** El número de condecoración entregado ese mes colocado a mano (ej. `001`)
+    """)
+    st.info("Aquí defines los prefijos de las 3 primeras partes para tenerlos listos en el formulario.")
+    
+    codigos_actuales = cargar_codigos()
+    
+    if codigos_actuales:
+        st.markdown("### Prefijos Registrados")
+        for idx, c in enumerate(codigos_actuales):
+            with st.container():
+                col_c1, col_c2, col_c3 = st.columns([3, 2, 1])
+                with col_c1:
+                    st.markdown(f"**Prefijo:** `{c['prefijo']}`")
+                    st.caption(f"Descripción: {c.get('descripcion', 'Sin descripción')}")
+                with col_c2:
+                    st.markdown(f"Distrito: **{c.get('distrito','')}** | Grupo: **{c.get('grupo','')}** | Siglas: **{c.get('siglas','')}**")
+                with col_c3:
+                    if st.button("🗑️ Eliminar", key=f"del_cod_{idx}"):
+                        codigos_actuales.pop(idx)
+                        guardar_codigos(codigos_actuales)
+                        st.success("Prefijo eliminado.")
+                        st.rerun()
+                st.divider()
+    else:
+        st.write("No hay prefijos registrados.")
+        
+    st.subheader("➕ Registrar Nuevo Prefijo de Código")
+    with st.form("form_nuevo_codigo", clear_on_submit=True):
+        col_d, col_g, col_s = st.columns(3)
+        with col_d:
+            nuevo_distrito = st.text_input("1. Distrito (ej. COQ):", max_chars=10).upper()
+        with col_g:
+            nuevo_grupo = st.text_input("2. Grupo Scout (ej. LCP):", max_chars=10).upper()
+        with col_s:
+            nuevas_siglas = st.text_input("3. Siglas Condecoración (ej. NPB):", max_chars=10).upper()
+            
+        nueva_desc = st.text_input("Descripción / Nombre de la Condecoración:", placeholder="ej. Nudo de Perseverancia en Bronce")
+        
+        btn_guardar_codigo = st.form_submit_button("Guardar Prefijo", type="primary")
+        if btn_guardar_codigo:
+            if not nuevo_distrito.strip() or not nuevo_grupo.strip() or not nuevas_siglas.strip():
+                st.error("Por favor completa los 3 campos del código (Distrito, Grupo y Siglas).")
+            else:
+                prefijo_generado = f"{nuevo_distrito.strip()}-{nuevo_grupo.strip()}-{nuevas_siglas.strip()}"
+                codigos_actuales.append({
+                    "id": prefijo_generado.lower().replace("-", "_"),
+                    "distrito": nuevo_distrito.strip(),
+                    "grupo": nuevo_grupo.strip(),
+                    "siglas": nuevas_siglas.strip(),
+                    "prefijo": prefijo_generado,
+                    "descripcion": nueva_desc.strip() or prefijo_generado
+                })
+                guardar_codigos(codigos_actuales)
+                st.success(f"¡Prefijo '{prefijo_generado}' registrado exitosamente!")
+                st.rerun()
+
+# -------------------------------------------------------------------------
+# TAB 3: GESTIÓN DE FIRMANTES
+# -------------------------------------------------------------------------
+with tab3:
     st.subheader("Autoridades y Firmantes Registrados")
     st.info("Aquí puedes cargar a los dirigentes y autoridades que firman las condecoraciones con sus cargos y firmas digitalizadas.")
     
@@ -236,9 +343,9 @@ with tab2:
                 st.rerun()
 
 # -------------------------------------------------------------------------
-# TAB 3: GESTIÓN DE FORMATOS Y PLANTILLAS
+# TAB 4: GESTIÓN DE FORMATOS Y PLANTILLAS
 # -------------------------------------------------------------------------
-with tab3:
+with tab4:
     st.subheader("Catálogo de Condecoraciones y Formatos PDF")
     st.info("Sube aquí tus plantillas PDF limpias. Si algún formato tiene una distribución diferente, puedes calibrar sus coordenadas individuales.")
     
@@ -265,7 +372,6 @@ with tab3:
                         st.success("Formato eliminado.")
                         st.rerun()
                 
-                # Desplegable para calibrar coordenadas
                 with st.expander(f"⚙️ Calibrar Posiciones para '{c['nombre']}'"):
                     st.caption("Ajusta las coordenadas si este formato tiene los textos o firmas en otra posición.")
                     col1, col2, col3 = st.columns(3)
