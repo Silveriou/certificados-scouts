@@ -239,12 +239,26 @@ with tab1:
             col_pref, col_corr = st.columns([2, 1])
             
             with col_pref:
-                lista_prefijos = [f"{c['prefijo']} ({c.get('descripcion', '')})" for c in codigos_guardados]
+                lista_prefijos = [f"{c['prefijo']} - {c.get('descripcion', '')}" for c in codigos_guardados]
                 if not lista_prefijos:
-                    lista_prefijos = ["COQ-LCP-NPB (Nudo de Perseverancia en Bronce)"]
+                    lista_prefijos = ["COQ-LCP-NPB - Nudo de Perseverancia en Bronce"]
                 
-                pref_sel = st.selectbox("Prefijo (Distrito-Grupo-Siglas):", lista_prefijos)
-                prefijo_puro = pref_sel.split(" ")[0].strip()
+                # Búsqueda inteligente del prefijo que coincida con la condecoración elegida
+                default_pref_idx = 0
+                if condec_obj:
+                    nom_condec_words = set(w for w in condec_obj["nombre"].lower().replace("de ", "").replace("en ", "").split() if len(w) > 2)
+                    for idx_c, c_item in enumerate(codigos_guardados):
+                        desc_words = set(w for w in c_item.get("descripcion", "").lower().replace("de ", "").replace("en ", "").split() if len(w) > 2)
+                        if nom_condec_words and len(nom_condec_words.intersection(desc_words)) >= 2:
+                            default_pref_idx = idx_c
+                            break
+                
+                pref_sel = st.selectbox(
+                    "Prefijo Oficial (Distrito-Grupo-Siglas):",
+                    lista_prefijos,
+                    index=default_pref_idx
+                )
+                prefijo_puro = pref_sel.split(" - ")[0].strip()
                 
             with col_corr:
                 correlativo = st.number_input("N° Correlativo:", min_value=1, max_value=999, value=1, step=1)

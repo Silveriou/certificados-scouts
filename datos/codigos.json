@@ -8,19 +8,275 @@
     "descripcion": "Nudo de Perseverancia en Bronce"
   },
   {
-    "id": "coq_lcp_beb",
-    "distrito": "COQ",
-    "grupo": "LCP",
-    "siglas": "BEB",
-    "prefijo": "COQ-LCP-BEB",
-    "descripcion": "Barra Espíritu Scout en Bronce"
-  },
-  {
     "id": "coq_lcp_npp",
     "distrito": "COQ",
     "grupo": "LCP",
     "siglas": "NPP",
     "prefijo": "COQ-LCP-NPP",
     "descripcion": "Nudo de Perseverancia en Plata"
+  },
+  {
+    "id": "coq_lcp_npo",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "NPO",
+    "prefijo": "COQ-LCP-NPO",
+    "descripcion": "Nudo de Perseverancia en Oro"
+  },
+  {
+    "id": "coq_lcp_nsb",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "NSB",
+    "prefijo": "COQ-LCP-NSB",
+    "descripcion": "Nudo de Servicio Institucional en Bronce"
+  },
+  {
+    "id": "coq_lcp_nsp",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "NSP",
+    "prefijo": "COQ-LCP-NSP",
+    "descripcion": "Nudo de Servicio Institucional en Plata"
+  },
+  {
+    "id": "coq_lcp_nso",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "NSO",
+    "prefijo": "COQ-LCP-NSO",
+    "descripcion": "Nudo de Servicio Institucional en Oro"
+  },
+  {
+    "id": "coq_lcp_beb",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "BEB",
+    "prefijo": "COQ-LCP-BEB",
+    "descripcion": "Barra de Espíritu Scout en Bronce"
+  },
+  {
+    "id": "coq_lcp_bep",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "BEP",
+    "prefijo": "COQ-LCP-BEP",
+    "descripcion": "Barra de Espíritu Scout en Plata"
+  },
+  {
+    "id": "coq_lcp_beo",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "BEO",
+    "prefijo": "COQ-LCP-BEO",
+    "descripcion": "Barra de Espíritu Scout en Oro"
+  },
+  {
+    "id": "coq_lcp_bev",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "BEV",
+    "prefijo": "COQ-LCP-BEV",
+    "descripcion": "Barra de Eventos - Vinotinto (Proyectos Juveniles)"
+  },
+  {
+    "id": "coq_lcp_bea",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "BEA",
+    "prefijo": "COQ-LCP-BEA",
+    "descripcion": "Barra de Eventos - Amarilla (Distrital)"
+  },
+  {
+    "id": "coq_lcp_beaz",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "BEAZ",
+    "prefijo": "COQ-LCP-BEAZ",
+    "descripcion": "Barra de Eventos - Azul (Regional)"
+  },
+  {
+    "id": "coq_lcp_ber",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "BER",
+    "prefijo": "COQ-LCP-BER",
+    "descripcion": "Barra de Eventos - Roja (Nacional)"
+  },
+  {
+    "id": "coq_lcp_bepu",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "BEPU",
+    "prefijo": "COQ-LCP-BEPU",
+    "descripcion": "Barra de Eventos - Púrpura (Internacional)"
+  },
+  {
+    "id": "coq_lcp_bli",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "BLI",
+    "prefijo": "COQ-LCP-BLI",
+    "descripcion": "Barra de Liderazgo"
+  },
+  {
+    "id": "coq_lcp_bsc",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "BSC",
+    "prefijo": "COQ-LCP-BSC",
+    "descripcion": "Botón Scout"
+  },
+  {
+    "id": "coq_lcp_bme",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "BME",
+    "prefijo": "COQ-LCP-BME",
+    "descripcion": "Botón de Mérito"
+  },
+  {
+    "id": "coq_lcp_dag",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "DAG",
+    "prefijo": "COQ-LCP-DAG",
+    "descripcion": "Diploma de Agradecimiento"
+  },
+  {
+    "id": "coq_lcp_pre",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "PRE",
+    "prefijo": "COQ-LCP-PRE",
+    "descripcion": "Placa de Reconocimiento"
+  },
+  {
+    "id": "coq_lcp_cte",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "CTE",
+    "prefijo": "COQ-LCP-CTE",
+    "descripcion": "Carta Testimonial"
+  },
+  {
+    "id": "coq_lcp_mm2",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "MM2",
+    "prefijo": "COQ-LCP-MM2",
+    "descripcion": "Medalla al Mérito en Segunda Clase"
+  },
+  {
+    "id": "coq_lcp_mm1",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "MM1",
+    "prefijo": "COQ-LCP-MM1",
+    "descripcion": "Medalla al Mérito en Primera Clase"
+  },
+  {
+    "id": "coq_lcp_mgr",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "MGR",
+    "prefijo": "COQ-LCP-MGR",
+    "descripcion": "Medalla de Gratitud"
+  },
+  {
+    "id": "coq_lcp_msj",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "MSJ",
+    "prefijo": "COQ-LCP-MSJ",
+    "descripcion": "Medalla San Jorge de Salvamento"
+  },
+  {
+    "id": "coq_lcp_mse",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "MSE",
+    "prefijo": "COQ-LCP-MSE",
+    "descripcion": "Medalla de Servicio"
+  },
+  {
+    "id": "coq_lcp_rop",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "ROP",
+    "prefijo": "COQ-LCP-ROP",
+    "descripcion": "Orden Ramón Ocando Pérez (Expansión)"
+  },
+  {
+    "id": "coq_lcp_bab",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "BAB",
+    "prefijo": "COQ-LCP-BAB",
+    "descripcion": "Orden Bernardo Aguilera Ballesteros (Programa de Jóvenes)"
+  },
+  {
+    "id": "coq_lcp_aag",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "AAG",
+    "prefijo": "COQ-LCP-AAG",
+    "descripcion": "Orden Adolfo Aristeguieta Gramcko (Formación)"
+  },
+  {
+    "id": "coq_lcp_rod",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "ROD",
+    "prefijo": "COQ-LCP-ROD",
+    "descripcion": "Orden Ricardo Ostberg - Mención Distrito"
+  },
+  {
+    "id": "coq_lcp_ror",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "ROR",
+    "prefijo": "COQ-LCP-ROR",
+    "descripcion": "Orden Ricardo Ostberg - Mención Región"
+  },
+  {
+    "id": "coq_lcp_sfb",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "SFB",
+    "prefijo": "COQ-LCP-SFB",
+    "descripcion": "Orden Salvador Fernández Bertrán (Gestión Institucional)"
+  },
+  {
+    "id": "coq_lcp_ogv",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "OGV",
+    "prefijo": "COQ-LCP-OGV",
+    "descripcion": "Orden Gustavo Vollmer (Finanzas y Desarrollo)"
+  },
+  {
+    "id": "coq_lcp_cam",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "CAM",
+    "prefijo": "COQ-LCP-CAM",
+    "descripcion": "Cruz de Alto Mérito"
+  },
+  {
+    "id": "coq_lcp_edm",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "EDM",
+    "prefijo": "COQ-LCP-EDM",
+    "descripcion": "Condecoración Estrella de Mar"
+  },
+  {
+    "id": "coq_lcp_ocp",
+    "distrito": "COQ",
+    "grupo": "LCP",
+    "siglas": "OCP",
+    "prefijo": "COQ-LCP-OCP",
+    "descripcion": "Orden del Caballo de Plata"
   }
 ]
