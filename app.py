@@ -1,5 +1,6 @@
 import os
 import json
+import base64
 import importlib
 import streamlit as st
 from datetime import datetime, date
@@ -7,10 +8,23 @@ import generator
 importlib.reload(generator)
 from generator import generar_certificado_pdf, pdf_to_image_bytes, DEFAULT_CONFIG
 
-# Configuración de página
+# Rutas base
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ASSETS_DIR = os.path.join(BASE_DIR, "assets")
+PLANTILLAS_DIR = os.path.join(BASE_DIR, "plantillas")
+FIRMAS_DIR = os.path.join(BASE_DIR, "firmas")
+DATOS_DIR = os.path.join(BASE_DIR, "datos")
+GENERADOS_DIR = os.path.join(BASE_DIR, "generados")
+
+for d in [ASSETS_DIR, PLANTILLAS_DIR, FIRMAS_DIR, DATOS_DIR, GENERADOS_DIR]:
+    os.makedirs(d, exist_ok=True)
+
+LOGO_SCOUT_PATH = os.path.join(ASSETS_DIR, "logo_scout.png")
+
+# Configuración de página con el logo scout oficial
 st.set_page_config(
-    page_title="Sistema de Emisión de Condecoraciones",
-    page_icon="⚜️",
+    page_title="ASV | Condecoraciones Scouts",
+    page_icon=LOGO_SCOUT_PATH if os.path.exists(LOGO_SCOUT_PATH) else "⚜️",
     layout="wide"
 )
 
@@ -21,19 +35,15 @@ MESES_ES = {
     9: "septiembre", 10: "octubre", 11: "noviembre", 12: "diciembre"
 }
 
-# Rutas base
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PLANTILLAS_DIR = os.path.join(BASE_DIR, "plantillas")
-FIRMAS_DIR = os.path.join(BASE_DIR, "firmas")
-DATOS_DIR = os.path.join(BASE_DIR, "datos")
-GENERADOS_DIR = os.path.join(BASE_DIR, "generados")
-
-for d in [PLANTILLAS_DIR, FIRMAS_DIR, DATOS_DIR, GENERADOS_DIR]:
-    os.makedirs(d, exist_ok=True)
-
 FIRMANTES_FILE = os.path.join(DATOS_DIR, "firmantes.json")
 CONDECORACIONES_FILE = os.path.join(DATOS_DIR, "condecoraciones.json")
 CODIGOS_FILE = os.path.join(DATOS_DIR, "codigos.json")
+
+def get_base64_image(image_path):
+    if os.path.exists(image_path):
+        with open(image_path, "rb") as f:
+            return base64.b64encode(f.read()).decode()
+    return ""
 
 def cargar_firmantes():
     if os.path.exists(FIRMANTES_FILE):
@@ -69,9 +79,106 @@ def guardar_codigos(codigos):
     with open(CODIGOS_FILE, "w", encoding="utf-8") as f:
         json.dump(codigos, f, indent=2, ensure_ascii=False)
 
-# Encabezado
-st.title("⚜️ Sistema de Emisión de Condecoraciones")
-st.caption("Generación oficial de certificados y distinciones en alta fidelidad")
+# Estilos personalizados Scouts
+logo_b64 = get_base64_image(LOGO_SCOUT_PATH)
+st.markdown(f"""
+<style>
+/* Botones primarios en Morado Scout Oficial (#622599) */
+.stButton>button {{
+    background-color: #622599 !important;
+    color: #FFFFFF !important;
+    border-radius: 8px !important;
+    border: none !important;
+    font-weight: 600 !important;
+    padding: 0.5rem 1.2rem !important;
+    transition: all 0.25s ease-in-out !important;
+}}
+.stButton>button:hover {{
+    background-color: #4B1779 !important;
+    color: #FFFFFF !important;
+    box-shadow: 0 4px 14px rgba(98, 37, 153, 0.4) !important;
+    transform: translateY(-1px);
+}}
+.stDownloadButton>button {{
+    background: linear-gradient(135deg, #622599 0%, #7E36C2 100%) !important;
+    color: #FFFFFF !important;
+    border-radius: 8px !important;
+    font-weight: 700 !important;
+    font-size: 1rem !important;
+    padding: 0.65rem 1.2rem !important;
+    box-shadow: 0 4px 14px rgba(98, 37, 153, 0.35) !important;
+    border: none !important;
+    transition: all 0.25s ease-in-out !important;
+}}
+.stDownloadButton>button:hover {{
+    background: linear-gradient(135deg, #4B1779 0%, #622599 100%) !important;
+    box-shadow: 0 6px 18px rgba(98, 37, 153, 0.5) !important;
+    color: #FFFFFF !important;
+    transform: translateY(-1px);
+}}
+/* Encabezado Scout Oficial */
+.scout-header {{
+    display: flex;
+    align-items: center;
+    gap: 22px;
+    padding: 20px 26px;
+    background: linear-gradient(135deg, #622599 0%, #401066 100%);
+    border-radius: 14px;
+    margin-bottom: 25px;
+    box-shadow: 0 8px 24px rgba(98, 37, 153, 0.28);
+}}
+.scout-header-img {{
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    background: #FFFFFF;
+    padding: 4px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+    flex-shrink: 0;
+}}
+.scout-header-text h1 {{
+    color: #FFFFFF !important;
+    margin: 0 !important;
+    font-size: 1.85rem !important;
+    font-weight: 800 !important;
+    letter-spacing: -0.5px;
+}}
+.scout-header-text p {{
+    color: #EBDCF9 !important;
+    margin: 4px 0 0 0 !important;
+    font-size: 1rem !important;
+}}
+.scout-badge {{
+    background: #EFE7F8;
+    color: #4B1779;
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 0.8rem;
+    font-weight: 700;
+    display: inline-block;
+    border: 1px solid #D5BEF0;
+    margin-top: 6px;
+}}
+/* Pie de página */
+.scout-footer {{
+    text-align: center;
+    color: #6C5B80;
+    font-size: 0.88rem;
+    padding: 30px 0 10px 0;
+    border-top: 1px solid #EFE7F8;
+    margin-top: 45px;
+}}
+</style>
+
+<div class="scout-header">
+    <img src="data:image/png;base64,{logo_b64}" class="scout-header-img" alt="Flor de Lis Scout">
+    <div class="scout-header-text">
+        <h1>Asociación de Scouts de Venezuela</h1>
+        <p>Sistema Oficial de Emisión de Condecoraciones y Certificados</p>
+        <span class="scout-badge">⚜️ Siempre Listos para Servir • Región Zulia</span>
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
 tab1, tab2, tab3, tab4 = st.tabs([
     "📜 Emitir Certificado",
@@ -149,7 +256,7 @@ with tab1:
             codigo_armado = f"{prefijo_puro}-{ano_str}-{mes_str}-{num_str}"
             
             codigo_control_final = st.text_input("Código de Control Final (editable):", value=codigo_armado)
-            st.caption(f"Estructura: `{prefijo_puro}` (3 partes) + `{ano_str}` (Año) + `{mes_str}` (Mes) + `{num_str}` (Correlativo)")
+            st.caption(f"Estructura oficial: `{prefijo_puro}` (3 partes) + `{ano_str}` (Año) + `{mes_str}` (Mes) + `{num_str}` (Correlativo)")
                 
             st.markdown("---")
             st.subheader("3. Firmantes Oficiales")
@@ -172,7 +279,7 @@ with tab1:
             firmante_izq_obj = next((f for f in firmantes if f["nombre"] == firmante_izq_nombre), None)
             firmante_der_obj = next((f for f in firmantes if f["nombre"] == firmante_der_nombre), None)
             
-            btn_generar = st.button("🚀 Generar Certificado", type="primary", use_container_width=True)
+            btn_generar = st.button("⚜️ Generar Certificado Oficial", type="primary", use_container_width=True)
             
         with col_prev:
             st.subheader("Vista Previa y Descarga")
@@ -442,3 +549,11 @@ with tab4:
                 guardar_condecoraciones(condec_actuales)
                 st.success(f"Condecoración '{nombre_condec}' agregada correctamente. Viene precalibrada con las posiciones estándar.")
                 st.rerun()
+
+# Pie de página Scout
+st.markdown("""
+<div class="scout-footer">
+    ⚜️ <strong>Asociación de Scouts de Venezuela</strong> • Fundada en 1913 • Reconocida por WOSM<br>
+    <em>"Construir un mundo mejor"</em> • Sistema Oficial de Condecoraciones
+</div>
+""", unsafe_allow_html=True)
