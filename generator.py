@@ -6,17 +6,21 @@ import subprocess
 import tempfile
 import zipfile
 from functools import lru_cache
+from xml.sax.saxutils import escape as xml_escape
 
 import docx
 import numpy as np
 import pymupdf
 import pypdf
 from docx.oxml.ns import qn
-from docx.text.paragraph import Paragraph
+from docx.text.paragraph import Paragraph as DocxParagraph
 from PIL import Image
+from reportlab.lib.enums import TA_JUSTIFY
+from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfgen import canvas
+from reportlab.platypus import Paragraph
 
 CARTA_ANCHO = 612.0   # 8.5 pulgadas
 CARTA_ALTO = 792.0    # 11 pulgadas
@@ -38,6 +42,13 @@ DEFAULT_CONFIG = {
     "firmante_der_x": 452.0,
     "firmante_der_y": 138.0,
     "ancho_firma": 135.0,
+    # Párrafo opcional (ej. certificados de Agradecimiento)
+    "usa_parrafo": False,
+    "parrafo_y_sup": 400.0,
+    "parrafo_y_inf": 180.0,
+    "parrafo_tamano_max": 13.0,
+    "parrafo_tamano_min": 9.0,
+    "parrafo_ancho_pct": 0.84,
 }
 
 
@@ -100,6 +111,49 @@ def _dibujar_firmante(c, firmante: dict, x: float, y: float, ancho: float, firma
 
 
 # -------------------------------------------------------------------------
+# PÁRRAFO JUSTIFICADO (para formatos como Agradecimiento)
+# -------------------------------------------------------------------------
+def _construir_parrafo(texto_html: str, ancho: float, tam: float, interlinea: float = 1.25):
+    estilo = ParagraphStyle(
+        name="certificado_parrafo",
+        fontName="Helvetica",
+        fontSize=tam,
+        leading=tam * interlinea,
+        alignment=TA_JUSTIFY,
+    )
+    p = Paragraph(texto_html, estilo)
+    _, alto = p.wrap(ancho, 10000)
+    return p, alto
+
+
+def dibujar_parrafo_justificado(c, texto: str, page_w: float, y_sup: float, y_inf: float,
+                                ancho_pct: float = 0.84, tam_max: float = 13.0, tam_min: float = 9.0) -> bool:
+    """
+    Dibuja un párrafo justificado, centrado verticalmente, dentro de la franja [y_inf, y_sup]
+    (coordenadas PDF medidas desde abajo). Reduce el tamaño de letra hasta que quepa.
+    Devuelve True si cupo sin llegar al tamaño mínimo.
+    """
+    texto = (texto or "").strip()
+    if not texto or y_sup <= y_inf:
+        return True
+
+    ancho = page_w * ancho_pct
+    alto_disponible = y_sup - y_inf
+    texto_html = xml_escape(texto).replace("\n", "<br/>")
+
+    tam = tam_max
+    p, alto = _construir_parrafo(texto_html, ancho, tam)
+    while alto > alto_disponible and tam > tam_min:
+        tam -= 0.5
+        p, alto = _construir_parrafo(texto_html, ancho, tam)
+
+    x = (page_w - ancho) / 2.0
+    y = y_inf + max(0.0, (alto_disponible - alto) / 2.0)
+    p.drawOn(c, x, y)
+    return alto <= alto_disponible
+
+
+# -------------------------------------------------------------------------
 # GENERACIÓN DEL CERTIFICADO
 # -------------------------------------------------------------------------
 def calcular_tamano_nombre(texto: str, ancho_linea: float = 515.0, porcentaje_objetivo: float = 0.88,
@@ -124,6 +178,7 @@ def generar_certificado_pdf(
     firmante_der: dict = None,
     firmas_dir: str = "",
     config: dict = None,
+    parrafo: str = "",
 ) -> bytes:
     """Superpone textos y firmas sobre la plantilla PDF oficial."""
     cfg = DEFAULT_CONFIG.copy()
@@ -156,18 +211,30 @@ def generar_certificado_pdf(
     c.setFont("Helvetica-Bold", cfg["cedula_tamano"])
     c.drawString(cfg["cedula_x"], cfg["cedula_y"], formatear_cedula_vzla(cedula))
 
-    # 3 y 4. Firmantes
+    # 3. Párrafo opcional (debajo de la cédula)
+    if cfg.get("usa_parrafo") and parrafo:
+        c.setFillColorRGB(0.1, 0.1, 0.1)
+        dibujar_parrafo_justificado(
+            c, parrafo, page_w,
+            y_sup=cfg.get("parrafo_y_sup", 400.0),
+            y_inf=cfg.get("parrafo_y_inf", 180.0),
+            ancho_pct=cfg.get("parrafo_ancho_pct", 0.84),
+            tam_max=cfg.get("parrafo_tamano_max", 13.0),
+            tam_min=cfg.get("parrafo_tamano_min", 9.0),
+        )
+
+    # 4 y 5. Firmantes
     if firmante_izq:
         _dibujar_firmante(c, firmante_izq, cfg["firmante_izq_x"], cfg["firmante_izq_y"], cfg["ancho_firma"], firmas_dir)
     if firmante_der:
         _dibujar_firmante(c, firmante_der, cfg["firmante_der_x"], cfg["firmante_der_y"], cfg["ancho_firma"], firmas_dir)
 
-    # 5. Lugar y fecha
+    # 6. Lugar y fecha
     if lugar_fecha:
         c.setFont("Helvetica", 9)
         c.drawCentredString(cfg.get("lugar_fecha_x", centro_x), cfg["lugar_fecha_y"], lugar_fecha)
 
-    # 6. Código de control
+    # 7. Código de control
     if codigo_control:
         cod_txt = codigo_control.strip()
         tam_cod = float(cfg["codigo_control_tamano"])
@@ -261,192 +328,9 @@ def zonas_variables(page_w: float, page_h: float, config: dict = None) -> dict:
     mx = page_w * 0.05
     y_firma_min = min(cfg["firmante_izq_y"], cfg["firmante_der_y"])
     y_firma_max = max(cfg["firmante_izq_y"], cfg["firmante_der_y"])
-    return {
+    zonas = {
         "nombre": r(mx, cfg["nombre_y"] - 3, page_w - mx,
                     cfg["nombre_y"] + cfg["nombre_tamano_max"] + 8),
         "cédula": r(cfg["cedula_x"] + 1, cfg["cedula_y"] - 4, cfg["cedula_x"] + 190,
                     cfg["cedula_y"] + cfg["cedula_tamano"] + 2),
-        "firmas y fecha": r(mx, min(cfg["lugar_fecha_y"] - 4, y_firma_min - 36), page_w - mx,
-                            max(y_firma_max + ALTO_MAX_FIRMA + 4, cfg["lugar_fecha_y"] + 12)),
-        "código": r(cfg["codigo_control_x"] - 49, cfg["codigo_control_y"] - 3,
-                    cfg["codigo_control_x"] + 49, cfg["codigo_control_y"] + 10),
-    }
-
-
-def limpiar_pdf_lleno(pdf_bytes: bytes, config: dict = None, profunda: bool = False):
-    """
-    Quita de un formato ya lleno el nombre, la cédula, las firmas, la fecha y el código,
-    sin tocar el fondo ni el texto fijo. Devuelve (pdf_limpio, informe).
-    profunda=True también elimina trazos vectoriales totalmente contenidos en las zonas
-    (para nombres convertidos a curvas).
-    """
-    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
-    try:
-        page = doc[0]
-        zonas = zonas_variables(page.rect.width, page.rect.height, config)
-        informe = {
-            "textos": [],
-            "imagenes": 0,
-            "tiene_texto": bool(page.get_text("text").strip()),
-        }
-
-        # 1) Firmas colocadas como imagen (se ignoran imágenes grandes como el fondo)
-        zona_firmas = zonas["firmas y fecha"]
-        area_pagina = page.rect.get_area()
-        borradas = set()
-        for info in page.get_image_info(xrefs=True):
-            xref = info.get("xref", 0)
-            bbox = pymupdf.Rect(info["bbox"])
-            area = bbox.get_area()
-            if xref <= 0 or xref in borradas or area <= 0 or area > 0.25 * area_pagina:
-                continue
-            if bbox.intersects(zona_firmas) and (bbox & zona_firmas).get_area() / area >= 0.6:
-                page.delete_image(xref)
-                borradas.add(xref)
-        informe["imagenes"] = len(borradas)
-
-        # 2) Texto dentro de las zonas (sin pintar nada encima: el fondo queda igual)
-        for nombre_zona, rect in zonas.items():
-            texto = " ".join(page.get_text("text", clip=rect).split())
-            if texto:
-                informe["textos"].append((nombre_zona, texto))
-            page.add_redact_annot(rect, fill=False, cross_out=False)
-        page.apply_redactions(images=0, graphics=1 if profunda else 0)
-
-        return doc.tobytes(garbage=3, deflate=True), informe
-    finally:
-        doc.close()
-
-
-# -------------------------------------------------------------------------
-# LIMPIEZA Y CONVERSIÓN DE PLANTILLAS WORD (.DOCX)
-# -------------------------------------------------------------------------
-PATRONES_RELLENO = [
-    r"\{\{.*?\}\}",    # {{nombre}}
-    r"\[[^\]]*\]",     # [Nombre del Galardonado]
-    r"_{4,}",          # ______
-    r"\.{5,}",         # ........
-]
-
-
-def _limpiar_texto(txt: str, extras: list) -> str:
-    for pat in PATRONES_RELLENO:
-        txt = re.sub(pat, " ", txt)
-    for extra in extras:
-        if extra and extra.strip():
-            txt = re.sub(re.escape(extra.strip()), " ", txt, flags=re.IGNORECASE)
-    return txt
-
-
-def _limpiar_parrafo_docx(paragraph, extras: list):
-    runs = [r for r in paragraph.runs if r.text]
-    if not runs:
-        return
-    # 1) Limpieza run por run (conserva todo el formato)
-    for run in runs:
-        nuevo = _limpiar_texto(run.text, extras)
-        if nuevo != run.text:
-            run.text = nuevo
-    # 2) Marcadores partidos entre varios runs: se consolida el párrafo
-    completo = "".join(r.text for r in runs)
-    limpio = _limpiar_texto(completo, extras)
-    if limpio != completo:
-        runs[0].text = limpio
-        for r in runs[1:]:
-            r.text = ""
-
-
-def _parrafos(elemento, parent):
-    """Todos los párrafos bajo un elemento: cuerpo, tablas y cuadros de texto."""
-    for p_el in elemento.iter(qn("w:p")):
-        yield Paragraph(p_el, parent)
-
-
-def limpiar_y_convertir_docx_a_pdf(docx_bytes: bytes, ruta_pdf_salida: str, textos_extra_borrar: list = None):
-    extras = textos_extra_borrar or []
-    doc = docx.Document(io.BytesIO(docx_bytes))
-
-    for p in _parrafos(doc.element.body, doc):
-        _limpiar_parrafo_docx(p, extras)
-
-    for section in doc.sections:
-        for parte in (section.header, section.footer):
-            if not parte.is_linked_to_previous:
-                for p in _parrafos(parte._element, parte):
-                    _limpiar_parrafo_docx(p, extras)
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        temp_docx = os.path.join(tmpdir, "plantilla_limpia.docx")
-        temp_pdf = os.path.join(tmpdir, "plantilla_limpia.pdf")
-        doc.save(temp_docx)
-
-        convertido = False
-        soffice_bin = shutil.which("soffice") or shutil.which("libreoffice")
-        if soffice_bin:
-            subprocess.run(
-                [soffice_bin, "--headless", "--convert-to", "pdf", "--outdir", tmpdir, temp_docx],
-                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180,
-            )
-            if os.path.exists(temp_pdf):
-                shutil.copy(temp_pdf, ruta_pdf_salida)
-                convertido = True
-
-        if not convertido:
-            try:
-                try:
-                    import pythoncom
-                    pythoncom.CoInitialize()
-                except Exception:
-                    pass
-                from docx2pdf import convert
-                convert(temp_docx, ruta_pdf_salida)
-                convertido = os.path.exists(ruta_pdf_salida)
-            except Exception as e:
-                raise RuntimeError(f"No se pudo convertir el Word a PDF: {e}")
-
-        if not convertido:
-            raise RuntimeError("No se encontró LibreOffice ni Microsoft Word para convertir el archivo .docx a PDF.")
-
-
-# -------------------------------------------------------------------------
-# RESPALDO Y RESTAURACIÓN EN ZIP
-# -------------------------------------------------------------------------
-def crear_respaldo_sistema_zip(plantillas_dir: str, firmas_dir: str, datos_dir: str) -> bytes:
-    buf = io.BytesIO()
-    carpetas = {"plantillas": plantillas_dir, "firmas": firmas_dir, "datos": datos_dir}
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        for nombre_carpeta, ruta_local in carpetas.items():
-            if os.path.exists(ruta_local):
-                for root, _, files in os.walk(ruta_local):
-                    for file in files:
-                        if file.startswith("_temp_") or file.endswith(".tmp"):
-                            continue
-                        full_path = os.path.join(root, file)
-                        rel_path = os.path.relpath(full_path, ruta_local).replace("\\", "/")
-                        z.write(full_path, f"{nombre_carpeta}/{rel_path}")
-    return buf.getvalue()
-
-
-def restaurar_respaldo_sistema_zip(zip_bytes: bytes, plantillas_dir: str, firmas_dir: str, datos_dir: str) -> int:
-    """Restaura plantillas, firmas y datos. Ignora rutas que intenten salir de esas carpetas."""
-    destinos = {"plantillas": plantillas_dir, "firmas": firmas_dir, "datos": datos_dir}
-    restaurados = 0
-    with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as z:
-        for member in z.namelist():
-            partes = [p for p in member.replace("\\", "/").split("/") if p]
-            if len(partes) < 2 or partes[0] not in destinos or member.endswith("/"):
-                continue
-            if any(p in ("..", ".") or ":" in p for p in partes):
-                continue
-            base = os.path.realpath(destinos[partes[0]])
-            ruta_final = os.path.realpath(os.path.join(base, *partes[1:]))
-            try:
-                if os.path.commonpath([base, ruta_final]) != base:
-                    continue
-            except ValueError:
-                continue
-            os.makedirs(os.path.dirname(ruta_final), exist_ok=True)
-            with z.open(member) as source, open(ruta_final, "wb") as target:
-                shutil.copyfileobj(source, target)
-            restaurados += 1
-    return restaurados
+        "firmas y fecha": r(mx,
