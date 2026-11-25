@@ -7,6 +7,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import time
 import unicodedata
 from datetime import datetime, timedelta, timezone
@@ -21,6 +22,7 @@ from generator import (
     crear_zip_certificados,
     formatear_cedula_vzla,
     generar_certificado_pdf,
+    limpiar_pdf_lleno,
     limpiar_y_convertir_docx_a_pdf,
     pdf_to_image_bytes,
     restaurar_respaldo_sistema_zip,
@@ -32,10 +34,11 @@ from generator import (
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ASSETS_DIR = os.path.join(BASE_DIR, "assets")
 PLANTILLAS_DIR = os.path.join(BASE_DIR, "plantillas")
+ORIGINALES_DIR = os.path.join(PLANTILLAS_DIR, "_originales")
 FIRMAS_DIR = os.path.join(BASE_DIR, "firmas")
 DATOS_DIR = os.path.join(BASE_DIR, "datos")
 
-for d in [ASSETS_DIR, PLANTILLAS_DIR, FIRMAS_DIR, DATOS_DIR]:
+for d in [ASSETS_DIR, PLANTILLAS_DIR, ORIGINALES_DIR, FIRMAS_DIR, DATOS_DIR]:
     os.makedirs(d, exist_ok=True)
 
 LOGO_SCOUT_PATH = os.path.join(ASSETS_DIR, "logo_scout.png")
@@ -1253,11 +1256,50 @@ def vista_firmantes():
 
 
 # -------------------------------------------------------------------------
+# LIMPIEZA DE FORMATOS LLENOS (apoyo para la vista de formatos)
+# -------------------------------------------------------------------------
+def descartar_original(archivo_pdf: str):
+    """Al subir una plantilla nueva, la copia original anterior ya no aplica."""
+    ruta = os.path.join(ORIGINALES_DIR, archivo_pdf)
+    if os.path.exists(ruta):
+        os.remove(ruta)
+
+
+def limpiar_plantilla(archivo_pdf: str, config: dict, profunda: bool = False) -> dict:
+    """Limpia la plantilla partiendo siempre de su copia original (se puede repetir sin acumular daños)."""
+    ruta = os.path.join(PLANTILLAS_DIR, archivo_pdf)
+    original = os.path.join(ORIGINALES_DIR, archivo_pdf)
+    if not os.path.exists(original):
+        shutil.copy2(ruta, original)
+    with open(original, "rb") as f:
+        limpio, informe = limpiar_pdf_lleno(f.read(), config, profunda)
+    with open(ruta, "wb") as f:
+        f.write(limpio)
+    return informe
+
+
+def resumen_limpieza(nombre: str, informe: dict):
+    partes = []
+    if informe["textos"]:
+        partes.append("texto eliminado: " + "; ".join(f"{zona}: «{txt}»" for zona, txt in informe["textos"]))
+    if informe["imagenes"]:
+        partes.append(f"{informe['imagenes']} firma(s) en imagen eliminada(s)")
+    if partes:
+        return "success", f"«{nombre}» limpiado. " + " | ".join(partes) + ". Revisa la vista grande del formato."
+    if not informe["tiene_texto"]:
+        return "warning", (f"«{nombre}»: el PDF no tiene texto editable (parece escaneado o aplanado). "
+                           "Si está lleno, no se puede limpiar automáticamente; prueba la limpieza profunda "
+                           "o sube la plantilla en blanco.")
+    return "info", f"«{nombre}»: no se encontró nada que limpiar en las zonas variables."
+
+
+# -------------------------------------------------------------------------
 # VISTA: FORMATOS Y RESPALDO
 # -------------------------------------------------------------------------
 def vista_formatos():
     st.subheader("Catálogo de condecoraciones y formatos (PDF y Word)")
-    st.info("Sube plantillas limpias en PDF o formatos en Word (.docx). Los Word se limpian de textos de relleno y se convierten a PDF.")
+    st.info("Sube plantillas en PDF o Word (.docx), en blanco o ya llenas: la app borra el nombre, la cédula, "
+            "las firmas, la fecha y el código, y deja el formato listo para emitir.")
     condec = cargar_condecoraciones()
     codigos = cargar_codigos()
     prefijos = [c["prefijo"] for c in codigos]
@@ -1290,6 +1332,9 @@ def vista_formatos():
         for idx, c in enumerate(condec):
             cfg = c["config"]
             k = f"{idx}_{c['id']}"
+            ruta_actual = os.path.join(PLANTILLAS_DIR, c["archivo_pdf"])
+            ruta_original = os.path.join(ORIGINALES_DIR, c["archivo_pdf"])
+
             c_info, c_prev, c_del = st.columns([3, 2, 1])
             with c_info:
                 st.markdown(f"### {c['nombre']}")
@@ -1297,9 +1342,8 @@ def vista_formatos():
                 origen = "asignado" if c.get("prefijo") in prefijos else "automático"
                 st.caption(f"Archivo: `{c['archivo_pdf']}` · Prefijo: `{pref_actual or 'sin prefijo'}` ({origen})")
             with c_prev:
-                ruta_pdf = os.path.join(PLANTILLAS_DIR, c["archivo_pdf"])
-                if os.path.exists(ruta_pdf):
-                    st.image(miniatura_pdf(ruta_pdf, os.path.getmtime(ruta_pdf)), width=110, caption="Miniatura")
+                if os.path.exists(ruta_actual):
+                    st.image(miniatura_pdf(ruta_actual, os.path.getmtime(ruta_actual)), width=110, caption="Miniatura")
                 else:
                     st.caption("⚠️ Falta el archivo PDF")
             with c_del:
@@ -1308,7 +1352,7 @@ def vista_formatos():
                     avisar(f"Formato «{c['nombre']}» eliminado.")
                     st.rerun()
 
-            with st.expander(f"⚙️ Prefijo y calibración de «{c['nombre']}»"):
+            with st.expander(f"⚙️ Prefijo, calibración y limpieza de «{c['nombre']}»"):
                 opciones = [AUTO] + prefijos
                 idx_pref = opciones.index(c["prefijo"]) if c.get("prefijo") in prefijos else 0
                 pref_sel = st.selectbox(
@@ -1355,6 +1399,34 @@ def vista_formatos():
                     guardar_condecoraciones(condec)
                     avisar(f"Configuración de «{c['nombre']}» guardada.")
                     st.rerun()
+
+                st.markdown("---")
+                st.markdown("**🧹 Limpieza de formato lleno**")
+                st.caption("Borra lo que haya en las zonas de nombre, cédula, firmas, fecha y código, "
+                           "según la calibración GUARDADA de este formato.")
+                profunda = st.checkbox("Limpieza profunda (nombres convertidos a curvas)", key=f"prof_{k}")
+                c_l1, c_l2 = st.columns(2)
+                with c_l1:
+                    if st.button("🧹 Limpiar este formato", key=f"limpiar_{k}"):
+                        if not os.path.exists(ruta_actual):
+                            st.error("Falta el archivo PDF de este formato.")
+                        else:
+                            try:
+                                informe = limpiar_plantilla(c["archivo_pdf"], c["config"], profunda)
+                                tipo_aviso, mensaje = resumen_limpieza(c["nombre"], informe)
+                                avisar(mensaje, tipo_aviso)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"No se pudo limpiar: {e}")
+                with c_l2:
+                    if os.path.exists(ruta_original) and st.button("↩️ Restaurar original", key=f"rest_{k}"):
+                        shutil.copy2(ruta_original, ruta_actual)
+                        os.remove(ruta_original)
+                        avisar(f"Se restauró el archivo original de «{c['nombre']}».")
+                        st.rerun()
+                if os.path.exists(ruta_actual) and st.checkbox("Ver el formato actual en grande", key=f"ver_{k}"):
+                    with open(ruta_actual, "rb") as f_ver:
+                        st.image(pdf_to_image_bytes(f_ver.read(), dpi=90), caption="Así quedó la plantilla")
             st.divider()
     else:
         st.write("No hay formatos registrados.")
@@ -1371,6 +1443,10 @@ def vista_formatos():
                 "Si el Word ya está rellenado, textos exactos a borrar (opcional, separados por coma):",
                 placeholder="ej. JUAN PEREZ, 12.345.678, Maracaibo 10 de abril",
             )
+            limpiar_lleno = st.checkbox(
+                "Limpiar datos de un formato ya lleno (nombre, cédula, firmas, fecha y código)", value=True)
+            limpieza_profunda = st.checkbox(
+                "Limpieza profunda (si el nombre fue convertido a curvas)", value=False)
             if st.form_submit_button("Guardar y procesar formato", type="primary"):
                 ident = slug(nombre)
                 if not nombre.strip() or not archivo:
@@ -1388,6 +1464,11 @@ def vista_formatos():
                         else:
                             with open(ruta_destino, "wb") as f_out:
                                 f_out.write(archivo.getbuffer())
+                        descartar_original(archivo_pdf)
+                        if limpiar_lleno:
+                            informe = limpiar_plantilla(archivo_pdf, DEFAULT_CONFIG, limpieza_profunda)
+                            tipo_aviso, mensaje = resumen_limpieza(nombre.strip(), informe)
+                            avisar(mensaje, tipo_aviso)
                         condec.append({
                             "id": ident, "nombre": nombre.strip(),
                             "archivo_pdf": archivo_pdf, "config": DEFAULT_CONFIG.copy(),
@@ -1404,6 +1485,9 @@ def vista_formatos():
             "Textos de ejemplo a borrar en los Word (opcional, separados por coma):",
             placeholder="ej. NOMBRE DEL GALARDONADO, 00.000.000", key="limpiar_word_lote",
         )
+        limpiar_lote = st.checkbox(
+            "Limpiar datos de formatos ya llenos (nombre, cédula, firmas, fecha y código)",
+            value=True, key="limpiar_lleno_lote")
         if archivos:
             st.info(f"**{len(archivos)} archivos** seleccionados.")
             if st.button("🚀 Subir, limpiar y registrar todo", type="primary"):
@@ -1421,7 +1505,15 @@ def vista_formatos():
                             else:
                                 with open(ruta_destino, "wb") as f_out:
                                     f_out.write(up.getbuffer())
-                            if any(c["archivo_pdf"] == archivo_pdf or c["id"] == ident for c in condec):
+                            existente = next((c for c in condec
+                                              if c["archivo_pdf"] == archivo_pdf or c["id"] == ident), None)
+                            descartar_original(archivo_pdf)
+                            if limpiar_lote:
+                                informe = limpiar_plantilla(
+                                    archivo_pdf, existente["config"] if existente else DEFAULT_CONFIG)
+                                tipo_aviso, mensaje = resumen_limpieza(up.name, informe)
+                                avisar(mensaje, tipo_aviso)
+                            if existente:
                                 actualizados += 1
                             else:
                                 condec.append({
