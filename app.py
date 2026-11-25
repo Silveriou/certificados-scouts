@@ -412,7 +412,7 @@ def codigo_ocupado(registro: list, codigo: str, cedula_fmt: str) -> bool:
     return any(r.get("codigo") == codigo and r.get("cedula") != cedula_fmt for r in registro)
 
 
-def registrar_emision(nombre, cedula, condec, codigo, lugar_fecha, firmante_izq, firmante_der) -> str:
+def registrar_emision(nombre, cedula, condec, codigo, lugar_fecha, firmante_izq, firmante_der, parrafo="") -> str:
     """Devuelve 'nuevo', 'actualizado' (mismo código y cédula: se corrige el asiento) u 'ocupado'."""
     reg = cargar_registro()
     cedula_fmt = formatear_cedula_vzla(cedula)
@@ -425,6 +425,7 @@ def registrar_emision(nombre, cedula, condec, codigo, lugar_fecha, firmante_izq,
         "nombre": nombre.strip().upper(),
         "cedula": cedula_fmt,
         "lugar_fecha": lugar_fecha.strip(),
+        "parrafo": (parrafo or "").strip(),
         "firmante_izq": firmante_izq.get("nombre", "") if firmante_izq else "",
         "cargo_izq": firmante_izq.get("cargo", "") if firmante_izq else "",
         "firmante_der": firmante_der.get("nombre", "") if firmante_der else "",
@@ -462,6 +463,8 @@ def normalizar_columna(col_nombre) -> str:
         return "Cedula"
     if palabras & {"correlativo", "numero", "nro", "num"}:
         return "Correlativo"
+    if palabras & {"parrafo", "mensaje", "motivo", "dedicatoria", "texto"}:
+        return "Parrafo"
     if palabras & {"nombre", "nombres", "galardonado", "beneficiario"}:
         return "Nombre"
     return str(col_nombre).strip().title()
@@ -510,10 +513,11 @@ def crear_excel_ejemplo(condecoraciones):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Galardonados"
-    ws.append(["Nombre", "Cedula", "Condecoracion", "Correlativo"])
-    ws.append(["CARLOS ALBERTO ESPINOZA", "33792612", nombres[0], ""])
-    ws.append(["MARIA ELENA CHACON", "28.450.119", nombres[-1], ""])
-    ws.append(["JOSE LUIS URDANETA", "31902833", "", ""])
+    ws.append(["Nombre", "Cedula", "Condecoracion", "Correlativo", "Parrafo"])
+    ws.append(["CARLOS ALBERTO ESPINOZA", "33792612", nombres[0], "", ""])
+    ws.append(["MARIA ELENA CHACON", "28.450.119", nombres[-1], "",
+              "Por su invaluable aporte y dedicación constante al servicio de la comunidad scout."])
+    ws.append(["JOSE LUIS URDANETA", "31902833", "", "", ""])
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -683,6 +687,15 @@ def emitir_individual(condecoraciones, firmantes, codigos):
         if cedula:
             st.caption(f"Cédula formateada: **V- {cedula}**")
 
+        parrafo_texto = ""
+        if condec["config"].get("usa_parrafo"):
+            parrafo_texto = st.text_area(
+                "📝 Párrafo del certificado (va debajo de la cédula):",
+                key=f"ind_parrafo_{condec['id']}", height=120,
+                help="Se justifica y se ajusta el tamaño de letra automáticamente para que quepa "
+                     "en el espacio calibrado para este formato.",
+            )
+
         st.markdown("---")
         st.subheader("2. Fecha y código de registro")
         c_f1, c_f2 = st.columns(2)
@@ -751,12 +764,13 @@ def emitir_individual(condecoraciones, firmantes, codigos):
                         lugar_fecha=lugar_fecha, codigo_control=codigo,
                         firmante_izq=f_izq, firmante_der=f_der,
                         firmas_dir=FIRMAS_DIR, config=condec.get("config"),
+                        parrafo=parrafo_texto,
                     )
                 st.session_state["ind_pdf"] = pdf_bytes
                 st.session_state["ind_archivo"] = f"Certificado_{slug(nombre)}_{codigo}.pdf"
                 st.session_state["ind_emitido"] = False
                 if btn_emitir:
-                    estado = registrar_emision(nombre, cedula, condec, codigo, lugar_fecha, f_izq, f_der)
+                    estado = registrar_emision(nombre, cedula, condec, codigo, lugar_fecha, f_izq, f_der, parrafo_texto)
                     if estado == "ocupado":
                         st.error(f"El código {codigo} acaba de ser usado por otra emisión. Cambia el correlativo.")
                     else:
@@ -791,8 +805,9 @@ def emitir_lote(condecoraciones, firmantes, codigos):
     st.subheader("⚡ Emisión masiva de certificados por lote")
     st.markdown("""
     El archivo puede llevar las columnas **Nombre**, **Cédula** (con o sin puntos) y, opcionalmente,
-    **Condecoración** y **Correlativo**. Si el correlativo va vacío, se asigna el siguiente número libre.
-    Cada fila usa el prefijo de su propia condecoración.
+    **Condecoración**, **Correlativo** y **Parrafo** (para formatos como Agradecimiento).
+    Si el correlativo va vacío, se asigna el siguiente número libre. Cada fila usa el prefijo de su
+    propia condecoración.
     """)
     st.download_button(
         label="📄 Descargar plantilla Excel de ejemplo (.xlsx)",
@@ -823,6 +838,14 @@ def emitir_lote(condecoraciones, firmantes, codigos):
             format_func=lambda p: f"{p} - {descripciones.get(p, '')}", key="lote_pref",
             help="Solo se usa si la condecoración de una fila no tiene prefijo propio ni uno parecido.",
         )
+
+        parrafo_defecto = ""
+        if any(c.get("config", {}).get("usa_parrafo") for c in condecoraciones):
+            st.markdown("#### Párrafo por defecto")
+            parrafo_defecto = st.text_area(
+                "Se usa en los formatos con párrafo si la fila no trae su propia columna «Parrafo»:",
+                key="lote_parrafo_defecto", height=100,
+            )
 
         st.markdown("#### Formato de impresión (hoja carta)")
         opcion_pag = st.radio(
@@ -896,6 +919,8 @@ def emitir_lote(condecoraciones, firmantes, codigos):
                         omitidos.append((n_fila, nom, f"Falta la plantilla '{condec['archivo_pdf']}'."))
                         continue
 
+                    parrafo_fila = str(fila.get("Parrafo", "")).strip() or parrafo_defecto
+
                     prefijo = prefijo_de(condec, codigos) or prefijo_respaldo
                     base = f"{prefijo}-{ano}-{mes}-"
                     if base not in contadores:
@@ -930,8 +955,9 @@ def emitir_lote(condecoraciones, firmantes, codigos):
                         lugar_fecha=lugar_fecha, codigo_control=codigo,
                         firmante_izq=f_izq, firmante_der=f_der,
                         firmas_dir=FIRMAS_DIR, config=condec.get("config"),
+                        parrafo=parrafo_fila,
                     )
-                    if registrar_emision(nom, ced, condec, codigo, lugar_fecha, f_izq, f_der) == "ocupado":
+                    if registrar_emision(nom, ced, condec, codigo, lugar_fecha, f_izq, f_der, parrafo_fila) == "ocupado":
                         omitidos.append((n_fila, nom, f"El código {codigo} ya está en uso."))
                         continue
                     usados.add(codigo)
@@ -1080,6 +1106,9 @@ def vista_registro():
                 f"🏅 **{item.get('condecoracion', '')}** | 🏷️ Código: `{item.get('codigo', '')}` | "
                 f"📅 {item.get('lugar_fecha', '')}{emitido_por}"
             )
+            if item.get("parrafo"):
+                with st.expander("Ver párrafo"):
+                    st.write(item["parrafo"])
         with c_a1:
             if st.button("🔄 Generar copia PDF", key=f"reprint_{clave}"):
                 condec = next((c for c in condecoraciones if c.get("id") == item.get("condecoracion_id")), None)
@@ -1103,6 +1132,7 @@ def vista_registro():
                             lugar_fecha=item.get("lugar_fecha", ""), codigo_control=item.get("codigo", ""),
                             firmante_izq=f_izq, firmante_der=f_der,
                             firmas_dir=FIRMAS_DIR, config=condec.get("config"),
+                            parrafo=item.get("parrafo", ""),
                         )
                         st.session_state["copia_pdf_nombre"] = nombre_copia
         with c_a2:
@@ -1340,7 +1370,8 @@ def vista_formatos():
                 st.markdown(f"### {c['nombre']}")
                 pref_actual = prefijo_de(c, codigos)
                 origen = "asignado" if c.get("prefijo") in prefijos else "automático"
-                st.caption(f"Archivo: `{c['archivo_pdf']}` · Prefijo: `{pref_actual or 'sin prefijo'}` ({origen})")
+                extra = " · con párrafo" if cfg.get("usa_parrafo") else ""
+                st.caption(f"Archivo: `{c['archivo_pdf']}` · Prefijo: `{pref_actual or 'sin prefijo'}` ({origen}){extra}")
             with c_prev:
                 if os.path.exists(ruta_actual):
                     st.image(miniatura_pdf(ruta_actual, os.path.getmtime(ruta_actual)), width=110, caption="Miniatura")
@@ -1382,6 +1413,42 @@ def vista_formatos():
                     n_cod_y = st.number_input("Altura Y del código:", value=float(cfg["codigo_control_y"]), step=0.5, key=f"ccy_{k}")
                     n_cod_t = st.number_input("Tamaño del código:", value=float(cfg["codigo_control_tamano"]), step=0.5, key=f"cct_{k}")
 
+                st.markdown("---")
+                st.markdown("**📝 Párrafo de agradecimiento (opcional)**")
+                usa_parrafo = st.checkbox(
+                    "Este formato tiene un párrafo debajo de la cédula",
+                    value=bool(cfg.get("usa_parrafo", False)), key=f"usap_{k}",
+                )
+                if usa_parrafo:
+                    cpa, cpb, cpc = st.columns(3)
+                    with cpa:
+                        n_par_sup = st.number_input(
+                            "Altura Y superior (justo bajo la cédula):",
+                            value=float(cfg.get("parrafo_y_sup", 400.0)), step=1.0, key=f"psup_{k}")
+                        n_par_inf = st.number_input(
+                            "Altura Y inferior (justo sobre el lema):",
+                            value=float(cfg.get("parrafo_y_inf", 180.0)), step=1.0, key=f"pinf_{k}")
+                    with cpb:
+                        n_par_tmax = st.number_input(
+                            "Tamaño máximo de letra:",
+                            value=float(cfg.get("parrafo_tamano_max", 13.0)), step=0.5, key=f"ptmax_{k}")
+                        n_par_tmin = st.number_input(
+                            "Tamaño mínimo de letra:",
+                            value=float(cfg.get("parrafo_tamano_min", 9.0)), step=0.5, key=f"ptmin_{k}")
+                    with cpc:
+                        n_par_ancho = st.number_input(
+                            "Ancho (% del ancho de hoja, igual al del nombre):",
+                            value=float(cfg.get("parrafo_ancho_pct", 0.84)) * 100, step=1.0, key=f"pancho_{k}",
+                        ) / 100.0
+                    st.caption("Escribe un texto de prueba largo en «Emitir Certificado» y revisa la vista previa "
+                              "para terminar de ajustar estas alturas.")
+                else:
+                    n_par_sup = cfg.get("parrafo_y_sup", 400.0)
+                    n_par_inf = cfg.get("parrafo_y_inf", 180.0)
+                    n_par_tmax = cfg.get("parrafo_tamano_max", 13.0)
+                    n_par_tmin = cfg.get("parrafo_tamano_min", 9.0)
+                    n_par_ancho = cfg.get("parrafo_ancho_pct", 0.84)
+
                 if st.button("💾 Guardar prefijo y calibración", key=f"save_cfg_{k}", type="primary"):
                     c["config"] = {
                         "nombre_y": n_nom_y, "nombre_tamano_max": n_nom_t,
@@ -1391,6 +1458,10 @@ def vista_formatos():
                         "firmante_izq_x": n_fi_x, "firmante_izq_y": n_f_y,
                         "firmante_der_x": n_fd_x, "firmante_der_y": n_f_y,
                         "ancho_firma": n_f_a,
+                        "usa_parrafo": usa_parrafo,
+                        "parrafo_y_sup": n_par_sup, "parrafo_y_inf": n_par_inf,
+                        "parrafo_tamano_max": n_par_tmax, "parrafo_tamano_min": n_par_tmin,
+                        "parrafo_ancho_pct": n_par_ancho,
                     }
                     if pref_sel == AUTO:
                         c.pop("prefijo", None)
@@ -1402,8 +1473,8 @@ def vista_formatos():
 
                 st.markdown("---")
                 st.markdown("**🧹 Limpieza de formato lleno**")
-                st.caption("Borra lo que haya en las zonas de nombre, cédula, firmas, fecha y código, "
-                           "según la calibración GUARDADA de este formato.")
+                st.caption("Borra lo que haya en las zonas de nombre, cédula, firmas, fecha, código y párrafo "
+                           "(si aplica), según la calibración GUARDADA de este formato.")
                 profunda = st.checkbox("Limpieza profunda (nombres convertidos a curvas)", key=f"prof_{k}")
                 c_l1, c_l2 = st.columns(2)
                 with c_l1:
@@ -1474,7 +1545,7 @@ def vista_formatos():
                             "archivo_pdf": archivo_pdf, "config": DEFAULT_CONFIG.copy(),
                         })
                         guardar_condecoraciones(condec)
-                        avisar(f"Formato «{nombre.strip()}» agregado.")
+                        avisar(f"Formato «{nombre.strip()}» agregado. Si necesita párrafo, actívalo en su calibración.")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Error al procesar el archivo: {e}")
