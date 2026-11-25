@@ -1,56 +1,135 @@
-import os
-import json
-import io
-import csv
 import base64
-import importlib
-import streamlit as st
+import csv
+import hashlib
+import hmac
+import io
+import json
+import os
+import re
+import secrets
+import time
+import unicodedata
+from datetime import datetime, timedelta, timezone
+
 import openpyxl
-from datetime import datetime, date
-import generator
-importlib.reload(generator)
+import streamlit as st
+
 from generator import (
-    generar_certificado_pdf,
-    pdf_to_image_bytes,
-    unir_certificados_pdf,
+    DEFAULT_CONFIG,
+    componer_paginas_carta,
+    crear_respaldo_sistema_zip,
     crear_zip_certificados,
     formatear_cedula_vzla,
+    generar_certificado_pdf,
     limpiar_y_convertir_docx_a_pdf,
-    crear_respaldo_sistema_zip,
+    pdf_to_image_bytes,
     restaurar_respaldo_sistema_zip,
-    DEFAULT_CONFIG
 )
 
-# Rutas base
+# -------------------------------------------------------------------------
+# RUTAS Y CONSTANTES
+# -------------------------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ASSETS_DIR = os.path.join(BASE_DIR, "assets")
 PLANTILLAS_DIR = os.path.join(BASE_DIR, "plantillas")
 FIRMAS_DIR = os.path.join(BASE_DIR, "firmas")
 DATOS_DIR = os.path.join(BASE_DIR, "datos")
-GENERADOS_DIR = os.path.join(BASE_DIR, "generados")
 
-for d in [ASSETS_DIR, PLANTILLAS_DIR, FIRMAS_DIR, DATOS_DIR, GENERADOS_DIR]:
+for d in [ASSETS_DIR, PLANTILLAS_DIR, FIRMAS_DIR, DATOS_DIR]:
     os.makedirs(d, exist_ok=True)
 
 LOGO_SCOUT_PATH = os.path.join(ASSETS_DIR, "logo_scout.png")
-
-# Configuración de página
-st.set_page_config(
-    page_title="ASV | Condecoraciones Scouts",
-    page_icon=LOGO_SCOUT_PATH if os.path.exists(LOGO_SCOUT_PATH) else "⚜️",
-    layout="wide"
-)
-
-MESES_ES = {
-    1: "enero", 2: "febrero", 3: "marzo", 4: "abril",
-    5: "mayo", 6: "junio", 7: "julio", 8: "agosto",
-    9: "septiembre", 10: "octubre", 11: "noviembre", 12: "diciembre"
-}
-
 FIRMANTES_FILE = os.path.join(DATOS_DIR, "firmantes.json")
 CONDECORACIONES_FILE = os.path.join(DATOS_DIR, "condecoraciones.json")
 CODIGOS_FILE = os.path.join(DATOS_DIR, "codigos.json")
 REGISTRO_FILE = os.path.join(DATOS_DIR, "registro.json")
+USUARIOS_FILE = os.path.join(DATOS_DIR, "usuarios.json")
+
+CIUDAD = "Maracaibo"
+TZ_VE = timezone(timedelta(hours=-4))  # Venezuela: UTC-4 fijo, sin horario de verano
+MESES_ES = {
+    1: "enero", 2: "febrero", 3: "marzo", 4: "abril", 5: "mayo", 6: "junio",
+    7: "julio", 8: "agosto", 9: "septiembre", 10: "octubre", 11: "noviembre", 12: "diciembre",
+}
+MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+ROLES = {
+    "admin": {
+        "nombre": "Administrador",
+        "descripcion": "Control total: usuarios, respaldo y restauración, limpieza del historial.",
+        "permisos": {"emitir", "registro", "anular", "limpiar", "codigos", "firmantes", "formatos", "respaldo", "usuarios"},
+    },
+    "gestor": {
+        "nombre": "Gestor",
+        "descripcion": "Emite, anula registros y gestiona códigos, firmantes y formatos.",
+        "permisos": {"emitir", "registro", "anular", "codigos", "firmantes", "formatos"},
+    },
+    "emisor": {
+        "nombre": "Emisor",
+        "descripcion": "Emite certificados y consulta el Libro de Registro.",
+        "permisos": {"emitir", "registro"},
+    },
+    "consulta": {
+        "nombre": "Consulta",
+        "descripcion": "Solo ve y exporta el Libro de Registro.",
+        "permisos": {"registro"},
+    },
+}
+
+st.set_page_config(
+    page_title="ASV | Condecoraciones Scouts",
+    page_icon=LOGO_SCOUT_PATH if os.path.exists(LOGO_SCOUT_PATH) else "⚜️",
+    layout="wide",
+)
+
+
+# -------------------------------------------------------------------------
+# UTILIDADES
+# -------------------------------------------------------------------------
+def ahora() -> datetime:
+    return datetime.now(TZ_VE)
+
+
+def sin_acentos(texto) -> str:
+    return "".join(ch for ch in unicodedata.normalize("NFKD", str(texto)) if not unicodedata.combining(ch))
+
+
+def normalizar(texto) -> str:
+    return re.sub(r"\s+", " ", sin_acentos(texto).lower()).strip()
+
+
+def slug(texto) -> str:
+    s = re.sub(r"[^a-z0-9]+", "_", sin_acentos(texto).lower()).strip("_")
+    return s or "sin_nombre"
+
+
+def texto_lugar_fecha(fecha) -> str:
+    return f"{CIUDAD}, {fecha.day} de {MESES_ES[fecha.month]} de {fecha.year}"
+
+
+def leer_json(ruta, defecto):
+    if os.path.exists(ruta):
+        with open(ruta, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return defecto
+
+
+def escribir_json(ruta, datos):
+    tmp = ruta + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(datos, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, ruta)
+
+
+def avisar(mensaje: str, tipo: str = "success"):
+    """Mensaje que sobrevive al st.rerun() y se muestra arriba en la siguiente carga."""
+    st.session_state.setdefault("_avisos", []).append((tipo, mensaje))
+
+
+def mostrar_avisos():
+    for tipo, mensaje in st.session_state.pop("_avisos", []):
+        getattr(st, tipo)(mensaje)
+
 
 def get_base64_image(image_path):
     if os.path.exists(image_path):
@@ -58,157 +137,408 @@ def get_base64_image(image_path):
             return base64.b64encode(f.read()).decode()
     return ""
 
-def cargar_firmantes():
-    if os.path.exists(FIRMANTES_FILE):
-        with open(FIRMANTES_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return []
 
-def guardar_firmantes(firmantes):
-    with open(FIRMANTES_FILE, "w", encoding="utf-8") as f:
-        json.dump(firmantes, f, indent=2, ensure_ascii=False)
+@st.cache_data(show_spinner=False)
+def miniatura_pdf(ruta: str, mtime: float) -> bytes:
+    with open(ruta, "rb") as f:
+        return pdf_to_image_bytes(f.read(), dpi=40)
+
+
+# -------------------------------------------------------------------------
+# DATOS
+# -------------------------------------------------------------------------
+def cargar_firmantes():
+    return leer_json(FIRMANTES_FILE, [])
+
+
+def guardar_firmantes(datos):
+    escribir_json(FIRMANTES_FILE, datos)
+
 
 def cargar_condecoraciones():
-    if os.path.exists(CONDECORACIONES_FILE):
-        with open(CONDECORACIONES_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            for item in data:
-                if "config" not in item:
-                    item["config"] = DEFAULT_CONFIG.copy()
-            return data
-    return []
+    data = leer_json(CONDECORACIONES_FILE, [])
+    for item in data:
+        item["config"] = {**DEFAULT_CONFIG, **item.get("config", {})}
+        item.setdefault("id", slug(item.get("nombre", "")))
+    return data
 
-def guardar_condecoraciones(condec):
-    with open(CONDECORACIONES_FILE, "w", encoding="utf-8") as f:
-        json.dump(condec, f, indent=2, ensure_ascii=False)
+
+def guardar_condecoraciones(datos):
+    escribir_json(CONDECORACIONES_FILE, datos)
+
 
 def cargar_codigos():
-    if os.path.exists(CODIGOS_FILE):
-        with open(CODIGOS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return []
+    return leer_json(CODIGOS_FILE, [])
 
-def guardar_codigos(codigos):
-    with open(CODIGOS_FILE, "w", encoding="utf-8") as f:
-        json.dump(codigos, f, indent=2, ensure_ascii=False)
+
+def guardar_codigos(datos):
+    escribir_json(CODIGOS_FILE, datos)
+
 
 def cargar_registro():
-    if os.path.exists(REGISTRO_FILE):
-        with open(REGISTRO_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return []
+    return leer_json(REGISTRO_FILE, [])
 
-def guardar_registro(reg):
-    with open(REGISTRO_FILE, "w", encoding="utf-8") as f:
-        json.dump(reg, f, indent=2, ensure_ascii=False)
 
-def registrar_emision(nombre, cedula, condecoracion, codigo, lugar_fecha, firmante_izq, firmante_der):
+def guardar_registro(datos):
+    escribir_json(REGISTRO_FILE, datos)
+
+
+def cargar_usuarios():
+    return leer_json(USUARIOS_FILE, [])
+
+
+def guardar_usuarios(datos):
+    escribir_json(USUARIOS_FILE, datos)
+
+
+# -------------------------------------------------------------------------
+# CONTROL DE ACCESO
+# -------------------------------------------------------------------------
+def hash_clave(clave: str, sal: str = None):
+    sal = sal or secrets.token_hex(16)
+    h = hashlib.pbkdf2_hmac("sha256", clave.encode("utf-8"), bytes.fromhex(sal), 200_000).hex()
+    return sal, h
+
+
+def verificar_clave(clave: str, sal: str, hash_guardado: str) -> bool:
+    try:
+        return hmac.compare_digest(hash_clave(clave, sal)[1], hash_guardado)
+    except Exception:
+        return False
+
+
+def admin_maestro():
+    """Administrador principal definido en los Secrets de Streamlit ([admin] usuario / clave)."""
+    try:
+        sec = st.secrets["admin"]
+        usuario = str(sec["usuario"]).strip().lower()
+        clave = str(sec["clave"])
+        if usuario and clave:
+            return {"usuario": usuario, "clave": clave}
+    except Exception:
+        pass
+    return None
+
+
+def autenticar(usuario: str, clave: str):
+    usuario = usuario.strip().lower()
+    maestro = admin_maestro()
+    if maestro and usuario == maestro["usuario"]:
+        if hmac.compare_digest(clave.encode("utf-8"), maestro["clave"].encode("utf-8")):
+            return {"usuario": usuario, "nombre": "Administrador principal", "rol": "admin", "maestro": True}
+        return None
+    for u in cargar_usuarios():
+        if u.get("usuario") == usuario and u.get("activo", True) and u.get("rol") in ROLES:
+            if verificar_clave(clave, u.get("sal", ""), u.get("hash", "")):
+                return {"usuario": usuario, "nombre": u.get("nombre") or usuario, "rol": u["rol"], "maestro": False}
+    return None
+
+
+def sesion_vigente() -> bool:
+    """Revalida la sesión en cada carga: si el usuario fue desactivado o cambió de nivel, se aplica al instante."""
+    ses = st.session_state.get("sesion")
+    if not ses:
+        return False
+    if ses.get("maestro"):
+        m = admin_maestro()
+        return bool(m) and m["usuario"] == ses["usuario"]
+    u = next((x for x in cargar_usuarios() if x.get("usuario") == ses["usuario"]), None)
+    if not u or not u.get("activo", True) or u.get("rol") not in ROLES:
+        return False
+    ses["rol"] = u["rol"]
+    ses["nombre"] = u.get("nombre") or u["usuario"]
+    return True
+
+
+def puede(permiso: str) -> bool:
+    ses = st.session_state.get("sesion")
+    return bool(ses) and permiso in ROLES.get(ses["rol"], {}).get("permisos", set())
+
+
+def usuario_actual() -> str:
+    return st.session_state.get("sesion", {}).get("usuario", "")
+
+
+def validar_nueva_clave(clave: str, repetir: str):
+    if len(clave) < 8:
+        return "La contraseña debe tener al menos 8 caracteres."
+    if clave != repetir:
+        return "Las contraseñas no coinciden."
+    return None
+
+
+def cerrar_sesion():
+    for k in list(st.session_state.keys()):
+        del st.session_state[k]
+
+
+def pantalla_acceso():
+    usuarios = cargar_usuarios()
+    maestro = admin_maestro()
+    _, centro, _ = st.columns([1, 1.3, 1])
+    with centro:
+        if not usuarios and not maestro:
+            st.subheader("🔐 Configuración inicial")
+            st.info("No hay usuarios todavía. Crea la cuenta del administrador principal.")
+            with st.form("form_admin_inicial"):
+                usuario = st.text_input("Usuario:", value="admin").strip().lower()
+                nombre = st.text_input("Nombre completo:")
+                clave = st.text_input("Contraseña (mínimo 8 caracteres):", type="password")
+                repetir = st.text_input("Repetir contraseña:", type="password")
+                if st.form_submit_button("Crear administrador", type="primary"):
+                    error = validar_nueva_clave(clave, repetir)
+                    if not re.fullmatch(r"[a-z0-9._-]{3,30}", usuario):
+                        st.error("El usuario debe tener de 3 a 30 caracteres: letras, números, punto, guion o guion bajo.")
+                    elif error:
+                        st.error(error)
+                    else:
+                        sal, h = hash_clave(clave)
+                        guardar_usuarios([{
+                            "usuario": usuario, "nombre": nombre.strip() or usuario, "rol": "admin",
+                            "activo": True, "sal": sal, "hash": h,
+                            "creado": ahora().strftime("%Y-%m-%d %H:%M:%S"), "creado_por": "configuración inicial",
+                        }])
+                        st.session_state["sesion"] = {
+                            "usuario": usuario, "nombre": nombre.strip() or usuario, "rol": "admin", "maestro": False,
+                        }
+                        st.rerun()
+        else:
+            st.subheader("🔐 Iniciar sesión")
+            with st.form("form_login"):
+                usuario = st.text_input("Usuario:")
+                clave = st.text_input("Contraseña:", type="password")
+                if st.form_submit_button("Entrar", type="primary"):
+                    ses = autenticar(usuario, clave)
+                    if ses:
+                        st.session_state["sesion"] = ses
+                        st.rerun()
+                    else:
+                        time.sleep(1.5)  # frena intentos repetidos
+                        st.error("Usuario o contraseña incorrectos, o cuenta desactivada.")
+    st.stop()
+
+
+def barra_lateral():
+    ses = st.session_state["sesion"]
+    with st.sidebar:
+        st.markdown(f"### 👤 {ses['nombre']}")
+        st.caption(f"Usuario: `{ses['usuario']}` · Nivel: **{ROLES[ses['rol']]['nombre']}**")
+        if st.button("Cerrar sesión"):
+            cerrar_sesion()
+            st.rerun()
+        if not ses.get("maestro"):
+            with st.expander("Cambiar mi contraseña"):
+                with st.form("form_mi_clave", clear_on_submit=True):
+                    actual = st.text_input("Contraseña actual:", type="password")
+                    nueva = st.text_input("Nueva contraseña:", type="password")
+                    repetir = st.text_input("Repetir nueva contraseña:", type="password")
+                    if st.form_submit_button("Cambiar"):
+                        usuarios = cargar_usuarios()
+                        u = next((x for x in usuarios if x["usuario"] == ses["usuario"]), None)
+                        error = validar_nueva_clave(nueva, repetir)
+                        if not u or not verificar_clave(actual, u.get("sal", ""), u.get("hash", "")):
+                            st.error("La contraseña actual no es correcta.")
+                        elif error:
+                            st.error(error)
+                        else:
+                            u["sal"], u["hash"] = hash_clave(nueva)
+                            guardar_usuarios(usuarios)
+                            st.success("Contraseña actualizada.")
+        else:
+            st.caption("La contraseña del administrador principal se cambia en los Secrets de Streamlit.")
+
+
+# -------------------------------------------------------------------------
+# CÓDIGOS, PREFIJOS Y REGISTRO
+# -------------------------------------------------------------------------
+PALABRAS_VACIAS = {"de", "en", "la", "el", "del", "y", "al", "a"}
+
+
+def palabras_clave(texto) -> set:
+    return {w for w in re.findall(r"[a-z0-9]+", normalizar(texto)) if w not in PALABRAS_VACIAS}
+
+
+def sugerir_prefijo(nombre_condec: str, codigos: list):
+    """Elige el prefijo cuya descripción se parece MÁS al nombre (no el primero que coincida)."""
+    objetivo = palabras_clave(nombre_condec)
+    mejor, mejor_puntaje = None, None
+    for c in codigos:
+        desc = palabras_clave(c.get("descripcion", ""))
+        comunes = len(objetivo & desc)
+        if comunes < 2:
+            continue
+        puntaje = (comunes, -len(objetivo ^ desc))
+        if mejor_puntaje is None or puntaje > mejor_puntaje:
+            mejor, mejor_puntaje = c["prefijo"], puntaje
+    return mejor
+
+
+def prefijo_de(condec: dict, codigos: list):
+    """Prefijo asignado al formato; si no tiene, el más parecido por nombre."""
+    pref = condec.get("prefijo")
+    if pref and any(c["prefijo"] == pref for c in codigos):
+        return pref
+    return sugerir_prefijo(condec.get("nombre", ""), codigos)
+
+
+def buscar_condecoracion(texto: str, condecoraciones: list):
+    t = normalizar(texto)
+    if not t:
+        return None
+    for c in condecoraciones:
+        if normalizar(c["nombre"]) == t or c.get("id") == slug(texto):
+            return c
+    candidatos = [c for c in condecoraciones if t in normalizar(c["nombre"]) or normalizar(c["nombre"]) in t]
+    return candidatos[0] if len(candidatos) == 1 else None
+
+
+def siguiente_correlativo(registro: list, prefijo: str, ano: str, mes: str) -> int:
+    base = f"{prefijo}-{ano}-{mes}-"
+    mayor = 0
+    for r in registro:
+        cod = str(r.get("codigo", ""))
+        if cod.startswith(base):
+            m = re.match(r"(\d+)", cod[len(base):])
+            if m:
+                mayor = max(mayor, int(m.group(1)))
+    return mayor + 1
+
+
+def codigo_ocupado(registro: list, codigo: str, cedula_fmt: str) -> bool:
+    """True si el código ya pertenece a OTRA persona."""
+    return any(r.get("codigo") == codigo and r.get("cedula") != cedula_fmt for r in registro)
+
+
+def registrar_emision(nombre, cedula, condec, codigo, lugar_fecha, firmante_izq, firmante_der) -> str:
+    """Devuelve 'nuevo', 'actualizado' (mismo código y cédula: se corrige el asiento) u 'ocupado'."""
     reg = cargar_registro()
     cedula_fmt = formatear_cedula_vzla(cedula)
-    nuevo_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{len(reg) + 1}"
-    nuevo_item = {
-        "id": nuevo_id,
-        "fecha_registro": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "codigo": codigo.strip(),
-        "condecoracion": condecoracion.strip(),
+    codigo = codigo.strip()
+    marca = ahora().strftime("%Y-%m-%d %H:%M:%S")
+    datos = {
+        "codigo": codigo,
+        "condecoracion": condec["nombre"].strip(),
+        "condecoracion_id": condec.get("id", ""),
         "nombre": nombre.strip().upper(),
         "cedula": cedula_fmt,
         "lugar_fecha": lugar_fecha.strip(),
         "firmante_izq": firmante_izq.get("nombre", "") if firmante_izq else "",
         "cargo_izq": firmante_izq.get("cargo", "") if firmante_izq else "",
         "firmante_der": firmante_der.get("nombre", "") if firmante_der else "",
-        "cargo_der": firmante_der.get("cargo", "") if firmante_der else ""
+        "cargo_der": firmante_der.get("cargo", "") if firmante_der else "",
     }
-    if not any(r.get("codigo") == nuevo_item["codigo"] and r.get("cedula") == nuevo_item["cedula"] for r in reg):
-        reg.insert(0, nuevo_item)
-        guardar_registro(reg)
+    for r in reg:
+        if r.get("codigo") == codigo:
+            if r.get("cedula") != cedula_fmt:
+                return "ocupado"
+            r.update(datos)
+            r["fecha_actualizacion"] = marca
+            r["actualizado_por"] = usuario_actual()
+            guardar_registro(reg)
+            return "actualizado"
+    nuevo = {
+        "id": f"{ahora().strftime('%Y%m%d%H%M%S')}_{secrets.token_hex(3)}",
+        "fecha_registro": marca,
+        "emitido_por": usuario_actual(),
+        **datos,
+    }
+    reg.insert(0, nuevo)
+    guardar_registro(reg)
+    return "nuevo"
 
-def normalizar_columna(col_nombre: str) -> str:
-    c = str(col_nombre).strip().lower().replace("_", " ")
-    if any(k in c for k in ["nombre", "galardonado", "beneficiario", "scout"]):
-        return "Nombre"
-    if any(k in c for k in ["cedula", "cédula", "ci", "c.i.", "documento", "identidad"]):
-        return "Cedula"
-    if any(k in c for k in ["condecoracion", "condecoración", "distincion", "distinción", "tipo", "premio"]):
+
+# -------------------------------------------------------------------------
+# LECTURA DE LOTES (EXCEL / CSV)
+# -------------------------------------------------------------------------
+def normalizar_columna(col_nombre) -> str:
+    texto = sin_acentos(str(col_nombre)).lower().replace(".", "")
+    palabras = set(re.findall(r"[a-z0-9]+", texto))
+    if palabras & {"condecoracion", "distincion", "premio", "reconocimiento"}:
         return "Condecoracion"
-    if any(k in c for k in ["correlativo", "numero", "número", "nro", "num"]):
+    if palabras & {"cedula", "ci", "documento", "identidad"}:
+        return "Cedula"
+    if palabras & {"correlativo", "numero", "nro", "num"}:
         return "Correlativo"
+    if palabras & {"nombre", "nombres", "galardonado", "beneficiario"}:
+        return "Nombre"
     return str(col_nombre).strip().title()
+
+
+def _fila_a_dict(encabezados, valores):
+    fila = {}
+    for i, h in enumerate(encabezados):
+        if h is None:
+            continue
+        val = valores[i] if i < len(valores) else None
+        if isinstance(val, float) and val.is_integer():
+            val = int(val)
+        txt = str(val).strip() if val is not None else ""
+        if h in fila and fila[h]:
+            continue  # ante encabezados repetidos, se conserva el primero con dato
+        fila[h] = txt
+    return fila
+
 
 def leer_archivo_lote(uploaded_file):
     filas = []
-    fname = uploaded_file.name.lower()
-    if fname.endswith(".csv"):
-        contenido = uploaded_file.getvalue().decode("utf-8", errors="ignore")
-        reader = csv.reader(io.StringIO(contenido))
-        header = next(reader, None)
-        if header:
-            norm_header = [normalizar_columna(h) for h in header]
-            for r in reader:
-                if any(cell.strip() for cell in r):
-                    fila_dict = {}
-                    for i, h in enumerate(norm_header):
-                        fila_dict[h] = r[i].strip() if i < len(r) else ""
-                    filas.append(fila_dict)
+    if uploaded_file.name.lower().endswith(".csv"):
+        contenido = uploaded_file.getvalue().decode("utf-8-sig", errors="ignore")
+        primera = contenido.splitlines()[0] if contenido.strip() else ""
+        delimitador = ";" if primera.count(";") > primera.count(",") else ","
+        filas_crudas = list(csv.reader(io.StringIO(contenido), delimiter=delimitador))
     else:
-        wb = openpyxl.load_workbook(uploaded_file, data_only=True)
-        sheet = wb.active
-        raw_rows = list(sheet.iter_rows(values_only=True))
-        if raw_rows:
-            header = raw_rows[0]
-            norm_header = [normalizar_columna(h) for h in header if h is not None]
-            for r in raw_rows[1:]:
-                if any(cell is not None and str(cell).strip() for cell in r):
-                    fila_dict = {}
-                    for i, h in enumerate(norm_header):
-                        val = r[i] if i < len(r) else ""
-                        fila_dict[h] = str(val).strip() if val is not None else ""
-                    filas.append(fila_dict)
+        wb = openpyxl.load_workbook(uploaded_file, data_only=True, read_only=True)
+        filas_crudas = [list(r) for r in wb.active.iter_rows(values_only=True)]
+        wb.close()
+    if not filas_crudas:
+        return filas
+    encabezados = [
+        normalizar_columna(h) if h is not None and str(h).strip() else None
+        for h in filas_crudas[0]
+    ]
+    for r in filas_crudas[1:]:
+        if any(cell is not None and str(cell).strip() for cell in r):
+            filas.append(_fila_a_dict(encabezados, r))
     return filas
 
-def crear_excel_ejemplo():
+
+def crear_excel_ejemplo(condecoraciones):
+    nombres = [c["nombre"] for c in condecoraciones] or ["Barra Espíritu Scout en Bronce"]
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Galardonados"
     ws.append(["Nombre", "Cedula", "Condecoracion", "Correlativo"])
-    ws.append(["CARLOS ALBERTO ESPINOZA", "33792612", "Barra Espíritu Scout en Bronce", 1])
-    ws.append(["MARIA ELENA CHACON", "28.450.119", "Nudo de Servicio en Oro", 2])
-    ws.append(["JOSE LUIS URDANETA", "31902833", "Barra de Liderazgo", 3])
+    ws.append(["CARLOS ALBERTO ESPINOZA", "33792612", nombres[0], ""])
+    ws.append(["MARIA ELENA CHACON", "28.450.119", nombres[-1], ""])
+    ws.append(["JOSE LUIS URDANETA", "31902833", "", ""])
     buf = io.BytesIO()
     wb.save(buf)
-    buf.seek(0)
     return buf.getvalue()
+
 
 def exportar_registro_excel(registros):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Libro_Oficial_ASV"
-    headers = [
-        "N° Registro", "Fecha y Hora", "Código de Control", "Condecoración",
-        "Galardonado", "Cédula", "Lugar y Fecha",
-        "Firmante Izquierdo", "Cargo Izq", "Firmante Derecho", "Cargo Der"
-    ]
-    ws.append(headers)
+    ws.append([
+        "N° Registro", "Fecha y Hora", "Código de Control", "Condecoración", "Galardonado", "Cédula",
+        "Lugar y Fecha", "Firmante Izquierdo", "Cargo Izq", "Firmante Derecho", "Cargo Der", "Emitido por",
+    ])
     for idx, r in enumerate(registros, start=1):
         ws.append([
-            idx,
-            r.get("fecha_registro", ""),
-            r.get("codigo", ""),
-            r.get("condecoracion", ""),
-            r.get("nombre", ""),
-            r.get("cedula", ""),
-            r.get("lugar_fecha", ""),
-            r.get("firmante_izq", ""),
-            r.get("cargo_izq", ""),
-            r.get("firmante_der", ""),
-            r.get("cargo_der", "")
+            idx, r.get("fecha_registro", ""), r.get("codigo", ""), r.get("condecoracion", ""),
+            r.get("nombre", ""), r.get("cedula", ""), r.get("lugar_fecha", ""),
+            r.get("firmante_izq", ""), r.get("cargo_izq", ""),
+            r.get("firmante_der", ""), r.get("cargo_der", ""), r.get("emitido_por", ""),
         ])
     buf = io.BytesIO()
     wb.save(buf)
-    buf.seek(0)
     return buf.getvalue()
 
-# Estilos personalizados Scouts
+
+# -------------------------------------------------------------------------
+# ESTILOS Y ENCABEZADO
+# -------------------------------------------------------------------------
 logo_b64 = get_base64_image(LOGO_SCOUT_PATH)
 st.markdown(f"""
 <style>
@@ -306,804 +636,964 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📜 Emitir Certificado",
-    "📖 Libro de Registro (Art. 35)",
-    "🏷️ Códigos de Control",
-    "✍️ Gestión de Firmantes",
-    "📁 Formatos y Respaldo"
-])
+# -------------------------------------------------------------------------
+# PUERTA DE ACCESO
+# -------------------------------------------------------------------------
+if not sesion_vigente():
+    st.session_state.pop("sesion", None)
+    pantalla_acceso()  # termina con st.stop()
+
+barra_lateral()
+mostrar_avisos()
+
 
 # -------------------------------------------------------------------------
-# TAB 1: EMITIR CERTIFICADO (INDIVIDUAL Y POR LOTE)
+# VISTA: EMITIR CERTIFICADO
 # -------------------------------------------------------------------------
-with tab1:
+def selector_firmantes(firmantes, clave):
+    nombres = ["(Ninguno)"] + [f["nombre"] for f in firmantes]
+    c1, c2 = st.columns(2)
+    with c1:
+        izq = st.selectbox("Firmante izquierdo:", nombres, index=1 if len(nombres) > 1 else 0, key=f"{clave}_izq")
+    with c2:
+        der = st.selectbox("Firmante derecho:", nombres, index=2 if len(nombres) > 2 else 0, key=f"{clave}_der")
+    return (
+        next((f for f in firmantes if f["nombre"] == izq), None),
+        next((f for f in firmantes if f["nombre"] == der), None),
+    )
+
+
+def emitir_individual(condecoraciones, firmantes, codigos):
+    col_form, col_prev = st.columns([1, 1], gap="large")
+
+    with col_form:
+        st.subheader("1. Condecoración y galardonado")
+        nombres_condec = [c["nombre"] for c in condecoraciones]
+        sel = st.selectbox("Condecoración / formato:", nombres_condec, key="ind_condec")
+        condec = next(c for c in condecoraciones if c["nombre"] == sel)
+
+        nombre = st.text_input("Nombre y apellido:", key="ind_nombre",
+                               help="Se imprime en mayúsculas, ajustado al ancho de la línea oficial.")
+        cedula_txt = st.text_input("Cédula de identidad:", key="ind_cedula",
+                                   help="Con o sin puntos. El sistema coloca los puntos automáticamente.")
+        cedula = formatear_cedula_vzla(cedula_txt)
+        if cedula:
+            st.caption(f"Cédula formateada: **V- {cedula}**")
+
+        st.markdown("---")
+        st.subheader("2. Fecha y código de registro")
+        c_f1, c_f2 = st.columns(2)
+        with c_f1:
+            fecha = st.date_input("Fecha:", value=ahora().date(), key="ind_fecha")
+        with c_f2:
+            lugar_fecha = st.text_input("Lugar y fecha en el certificado:", value=texto_lugar_fecha(fecha))
+
+        prefijos = [c["prefijo"] for c in codigos]
+        descripciones = {c["prefijo"]: c.get("descripcion", "") for c in codigos}
+        sugerido = prefijo_de(condec, codigos)
+        idx_pref = prefijos.index(sugerido) if sugerido in prefijos else 0
+        if not sugerido:
+            st.warning("Este formato no tiene prefijo asignado ni uno parecido. Revisa el prefijo antes de emitir.")
+
+        c_p, c_c = st.columns([2, 1])
+        with c_p:
+            prefijo = st.selectbox(
+                "Prefijo oficial (Distrito-Grupo-Siglas):", prefijos, index=idx_pref,
+                format_func=lambda p: f"{p} - {descripciones.get(p, '')}",
+                key=f"ind_pref_{condec['id']}",
+            )
+        ano, mes = str(fecha.year), f"{fecha.month:02d}"
+        siguiente = siguiente_correlativo(cargar_registro(), prefijo, ano, mes)
+        with c_c:
+            correlativo = st.number_input(
+                "N° correlativo:", min_value=1, max_value=9999, value=min(siguiente, 9999), step=1,
+                key=f"ind_corr_{prefijo}_{ano}_{mes}_{siguiente}",
+                help="Se sugiere el siguiente número libre según el Libro de Registro.",
+            )
+        codigo_armado = f"{prefijo}-{ano}-{mes}-{int(correlativo):03d}"
+        codigo = st.text_input("Código de control final (editable):", value=codigo_armado).strip()
+
+        st.markdown("---")
+        st.subheader("3. Firmantes oficiales")
+        f_izq, f_der = selector_firmantes(firmantes, "ind")
+
+        c_b1, c_b2 = st.columns(2)
+        with c_b1:
+            btn_prev = st.button("👁️ Vista previa (no registra)")
+        with c_b2:
+            btn_emitir = st.button("⚜️ Emitir y registrar", type="primary")
+
+    with col_prev:
+        st.subheader("Vista previa y descarga")
+
+        if btn_prev or btn_emitir:
+            ruta_template = os.path.join(PLANTILLAS_DIR, condec["archivo_pdf"])
+            errores = []
+            if not nombre.strip():
+                errores.append("Escribe el nombre del galardonado.")
+            if not os.path.exists(ruta_template):
+                errores.append(f"El archivo de plantilla '{condec['archivo_pdf']}' no existe.")
+            if btn_emitir and not codigo:
+                errores.append("El código de control no puede estar vacío.")
+            if btn_emitir and codigo and codigo_ocupado(cargar_registro(), codigo, cedula):
+                errores.append(f"El código {codigo} ya está registrado a nombre de otra persona. Usa otro correlativo.")
+
+            if errores:
+                for e in errores:
+                    st.error(e)
+            else:
+                with st.spinner("Procesando documento oficial..."):
+                    pdf_bytes = generar_certificado_pdf(
+                        template_path=ruta_template, nombre=nombre, cedula=cedula,
+                        lugar_fecha=lugar_fecha, codigo_control=codigo,
+                        firmante_izq=f_izq, firmante_der=f_der,
+                        firmas_dir=FIRMAS_DIR, config=condec.get("config"),
+                    )
+                st.session_state["ind_pdf"] = pdf_bytes
+                st.session_state["ind_archivo"] = f"Certificado_{slug(nombre)}_{codigo}.pdf"
+                st.session_state["ind_emitido"] = False
+                if btn_emitir:
+                    estado = registrar_emision(nombre, cedula, condec, codigo, lugar_fecha, f_izq, f_der)
+                    if estado == "ocupado":
+                        st.error(f"El código {codigo} acaba de ser usado por otra emisión. Cambia el correlativo.")
+                    else:
+                        st.session_state["ind_emitido"] = True
+                        if estado == "nuevo":
+                            avisar(f"Certificado emitido y registrado con el código {codigo}.")
+                        else:
+                            avisar(f"El código {codigo} ya existía para esta cédula: se actualizó el asiento del Libro.", "info")
+                        st.rerun()
+
+        if "ind_pdf" in st.session_state:
+            emitido = st.session_state.get("ind_emitido", False)
+            st.image(
+                pdf_to_image_bytes(st.session_state["ind_pdf"]),
+                caption="Certificado emitido" if emitido else "BORRADOR: aún no registrado",
+            )
+            if emitido:
+                st.download_button(
+                    label="📥 Descargar certificado oficial en PDF",
+                    data=st.session_state["ind_pdf"],
+                    file_name=st.session_state.get("ind_archivo", "Certificado.pdf"),
+                    mime="application/pdf",
+                    type="primary",
+                )
+            else:
+                st.info("Esto es un borrador. Pulsa «Emitir y registrar» para asentarlo en el Libro y habilitar la descarga.")
+        else:
+            st.info("Completa el formulario y pulsa «Vista previa» o «Emitir y registrar».")
+
+
+def emitir_lote(condecoraciones, firmantes, codigos):
+    st.subheader("⚡ Emisión masiva de certificados por lote")
+    st.markdown("""
+    El archivo puede llevar las columnas **Nombre**, **Cédula** (con o sin puntos) y, opcionalmente,
+    **Condecoración** y **Correlativo**. Si el correlativo va vacío, se asigna el siguiente número libre.
+    Cada fila usa el prefijo de su propia condecoración.
+    """)
+    st.download_button(
+        label="📄 Descargar plantilla Excel de ejemplo (.xlsx)",
+        data=crear_excel_ejemplo(condecoraciones),
+        file_name="plantilla_condecoraciones_scouts.xlsx",
+        mime=MIME_XLSX,
+    )
+    st.markdown("---")
+
+    col_cfg, col_file = st.columns([1, 1], gap="large")
+
+    with col_cfg:
+        st.markdown("#### Configuración del lote")
+        nombres_condec = [c["nombre"] for c in condecoraciones]
+        sel = st.selectbox("Condecoración para filas que no la indiquen:", nombres_condec, key="lote_condec")
+        condec_defecto = next(c for c in condecoraciones if c["nombre"] == sel)
+
+        c_f1, c_f2 = st.columns(2)
+        with c_f1:
+            fecha = st.date_input("Fecha de emisión:", value=ahora().date(), key="lote_fecha")
+        with c_f2:
+            lugar_fecha = st.text_input("Lugar y fecha:", value=texto_lugar_fecha(fecha))
+
+        prefijos = [c["prefijo"] for c in codigos]
+        descripciones = {c["prefijo"]: c.get("descripcion", "") for c in codigos}
+        prefijo_respaldo = st.selectbox(
+            "Prefijo para formatos sin prefijo asignado:", prefijos,
+            format_func=lambda p: f"{p} - {descripciones.get(p, '')}", key="lote_pref",
+            help="Solo se usa si la condecoración de una fila no tiene prefijo propio ni uno parecido.",
+        )
+
+        st.markdown("#### Formato de impresión (hoja carta)")
+        opcion_pag = st.radio(
+            "Certificados por página:",
+            ["1 por página (carta vertical)", "2 por página (carta horizontal)"],
+            key="lote_por_pagina",
+            help="Puedes cambiarlo después de generar el lote sin volver a emitir.",
+        )
+        por_pagina = 2 if opcion_pag.startswith("2") else 1
+        linea_corte = False
+        if por_pagina == 2:
+            linea_corte = st.checkbox("Dibujar línea de corte al centro", value=True, key="lote_linea")
+            st.caption("Cada certificado queda de unos 13 × 16,8 cm. Imprime al 100 %, sin «ajustar a la página».")
+
+        st.markdown("#### Firmantes oficiales del lote")
+        f_izq, f_der = selector_firmantes(firmantes, "lote")
+
+    with col_file:
+        st.markdown("#### Cargar archivo de galardonados")
+        archivo = st.file_uploader("Archivo Excel (.xlsx) o CSV:", type=["xlsx", "csv"], key="lote_archivo")
+        filas = []
+        if archivo:
+            try:
+                filas = leer_archivo_lote(archivo)
+            except Exception as e:
+                st.error(f"No se pudo leer el archivo: {e}")
+            if filas:
+                for f in filas:
+                    if "Cedula" in f:
+                        f["Cedula"] = formatear_cedula_vzla(f["Cedula"])
+                if "Nombre" not in filas[0]:
+                    st.error("No se encontró una columna de nombres (Nombre, Galardonado o Beneficiario).")
+                    filas = []
+                else:
+                    st.success(f"Archivo cargado: **{len(filas)} filas** detectadas.")
+                    st.dataframe(filas[:10])
+            elif archivo:
+                st.error("No se encontraron filas con datos.")
+
+        if filas and st.button("🚀 Procesar y generar lote completo", type="primary"):
+            progreso = st.progress(0.0)
+            estado_txt = st.empty()
+            registro = cargar_registro()
+            ano, mes = str(fecha.year), f"{fecha.month:02d}"
+            contadores, usados = {}, set()
+            pdfs, omitidos = [], []
+            total = len(filas)
+
+            for i, fila in enumerate(filas):
+                n_fila = i + 2  # fila real en el Excel (la 1 es el encabezado)
+                estado_txt.text(f"Procesando fila {i + 1} de {total}...")
+                progreso.progress((i + 1) / total)
+                try:
+                    nom = str(fila.get("Nombre", "")).strip().upper()
+                    ced = formatear_cedula_vzla(fila.get("Cedula", ""))
+                    if not nom:
+                        omitidos.append((n_fila, "(sin nombre)", "La fila no tiene nombre."))
+                        continue
+
+                    texto_condec = str(fila.get("Condecoracion", "")).strip()
+                    if texto_condec:
+                        condec = buscar_condecoracion(texto_condec, condecoraciones)
+                        if not condec:
+                            omitidos.append((n_fila, nom, f"Condecoración no reconocida: «{texto_condec}»."))
+                            continue
+                    else:
+                        condec = condec_defecto
+
+                    ruta_template = os.path.join(PLANTILLAS_DIR, condec["archivo_pdf"])
+                    if not os.path.exists(ruta_template):
+                        omitidos.append((n_fila, nom, f"Falta la plantilla '{condec['archivo_pdf']}'."))
+                        continue
+
+                    prefijo = prefijo_de(condec, codigos) or prefijo_respaldo
+                    base = f"{prefijo}-{ano}-{mes}-"
+                    if base not in contadores:
+                        contadores[base] = siguiente_correlativo(registro, prefijo, ano, mes)
+
+                    num = None
+                    corr_txt = str(fila.get("Correlativo", "")).strip()
+                    if corr_txt:
+                        try:
+                            num = int(float(corr_txt))
+                        except ValueError:
+                            num = None
+                    codigo = None
+                    if num is None or num < 1:
+                        # Si esta persona ya tiene esa condecoración este mes, se reutiliza su código
+                        previo = next((r for r in registro if ced and r.get("cedula") == ced
+                                       and str(r.get("codigo", "")).startswith(base)), None)
+                        if previo:
+                            codigo = previo["codigo"]
+                        else:
+                            num = contadores[base]
+                    if codigo is None:
+                        contadores[base] = max(contadores[base], num + 1)
+                        codigo = f"{base}{num:03d}"
+
+                    if codigo in usados or codigo_ocupado(registro, codigo, ced):
+                        omitidos.append((n_fila, nom, f"El código {codigo} ya está en uso."))
+                        continue
+
+                    pdf_ind = generar_certificado_pdf(
+                        template_path=ruta_template, nombre=nom, cedula=ced,
+                        lugar_fecha=lugar_fecha, codigo_control=codigo,
+                        firmante_izq=f_izq, firmante_der=f_der,
+                        firmas_dir=FIRMAS_DIR, config=condec.get("config"),
+                    )
+                    if registrar_emision(nom, ced, condec, codigo, lugar_fecha, f_izq, f_der) == "ocupado":
+                        omitidos.append((n_fila, nom, f"El código {codigo} ya está en uso."))
+                        continue
+                    usados.add(codigo)
+                    pdfs.append((f"Certificado_{codigo}_{slug(nom)}.pdf", pdf_ind))
+                except Exception as e:
+                    omitidos.append((n_fila, str(fila.get("Nombre", "")), f"Error: {e}"))
+
+            estado_txt.empty()
+            progreso.empty()
+            st.session_state["lote"] = {
+                "pdfs": pdfs,
+                "zip": crear_zip_certificados(pdfs) if pdfs else b"",
+                "omitidos": omitidos,
+                "fecha": fecha.strftime("%Y%m%d"),
+                "clave_pdf": None,
+                "pdf": b"",
+            }
+
+    # Resultados (persisten entre recargas; el formato de página se puede cambiar sin re-emitir)
+    lote = st.session_state.get("lote")
+    if lote:
+        st.markdown("---")
+        st.markdown("### 📥 Resultado del lote")
+        n = len(lote["pdfs"])
+        if n:
+            clave = (por_pagina, linea_corte)
+            if lote.get("clave_pdf") != clave:
+                with st.spinner("Componiendo el PDF para imprimir..."):
+                    lote["pdf"] = componer_paginas_carta(
+                        [b for _, b in lote["pdfs"]], por_pagina=por_pagina, linea_corte=linea_corte,
+                    )
+                lote["clave_pdf"] = clave
+            paginas = n if por_pagina == 1 else (n + 1) // 2
+            st.success(f"{n} certificados emitidos y registrados.")
+            c_d1, c_d2 = st.columns(2)
+            with c_d1:
+                st.download_button(
+                    label=f"📄 PDF para imprimir: {por_pagina} por página ({paginas} hojas carta)",
+                    data=lote["pdf"],
+                    file_name=f"Lote_Condecoraciones_{lote['fecha']}_{por_pagina}x.pdf",
+                    mime="application/pdf",
+                    type="primary",
+                    key="lote_dl_pdf",
+                )
+            with c_d2:
+                st.download_button(
+                    label="📦 ZIP con los PDF individuales",
+                    data=lote["zip"],
+                    file_name=f"Lote_Condecoraciones_{lote['fecha']}.zip",
+                    mime="application/zip",
+                    key="lote_dl_zip",
+                )
+        else:
+            st.error("No se emitió ningún certificado.")
+        if lote["omitidos"]:
+            with st.expander(f"⚠️ {len(lote['omitidos'])} filas omitidas (no se emitieron)", expanded=True):
+                for n_fila, nom, motivo in lote["omitidos"]:
+                    st.markdown(f"- **Fila {n_fila}** · {nom}: {motivo}")
+        if st.button("Cerrar resultado del lote"):
+            st.session_state.pop("lote", None)
+            st.rerun()
+
+
+def vista_emitir():
     condecoraciones = cargar_condecoraciones()
     firmantes = cargar_firmantes()
-    codigos_guardados = cargar_codigos()
-    
+    codigos = cargar_codigos()
     if not condecoraciones:
-        st.warning("No hay formatos de condecoración cargados. Por favor ve a la pestaña 'Formatos y Respaldo' para agregar uno.")
-    elif not firmantes:
-        st.warning("No hay firmantes registrados. Por favor ve a la pestaña 'Gestión de Firmantes' para agregar al menos uno.")
+        st.warning("No hay formatos de condecoración cargados. Debe agregarlos un Gestor o Administrador.")
+        return
+    if not firmantes:
+        st.warning("No hay firmantes registrados. Debe agregarlos un Gestor o Administrador.")
+        return
+    if not codigos:
+        st.warning("No hay prefijos de código registrados. Debe agregarlos un Gestor o Administrador.")
+        return
+    modo = st.radio(
+        "Modalidad de emisión:",
+        ["Individual (uno a uno)", "⚡ Emisión masiva por lote (desde Excel)"],
+        horizontal=True,
+    )
+    st.markdown("---")
+    if modo.startswith("Individual"):
+        emitir_individual(condecoraciones, firmantes, codigos)
     else:
-        modo_emision = st.radio(
-            "Modalidad de Emisión:",
-            ["Individual (Uno a Uno)", "⚡ Emisión Masiva por Lote (Desde Excel)"],
-            horizontal=True
-        )
-        st.markdown("---")
-        
-        # MODO INDIVIDUAL
-        if modo_emision == "Individual (Uno a Uno)":
-            col_form, col_prev = st.columns([1, 1], gap="large")
-            
-            with col_form:
-                st.subheader("1. Condecoración y Galardonado")
-                nombres_condec = [c["nombre"] for c in condecoraciones]
-                condec_seleccionada = st.selectbox("Seleccione la Condecoración / Formato:", nombres_condec)
-                condec_obj = next((c for c in condecoraciones if c["nombre"] == condec_seleccionada), None)
-                
-                nombre_galardonado = st.text_input(
-                    "Nombre y Apellido:",
-                    value="SILVERIO A. URDANETA S.",
-                    help="Se imprimirá en mayúsculas ocupando aproximadamente el 90% de la línea oficial"
-                )
-                
-                cedula_input = st.text_input(
-                    "Cédula de Identidad:",
-                    value="11289602",
-                    help="Puedes escribirla con o sin puntos (ej: 11289602). El sistema colocará los puntos automáticamente."
-                )
-                cedula = formatear_cedula_vzla(cedula_input)
-                if cedula:
-                    st.caption(f"Vista previa de cédula formateada: **V- {cedula}**")
-                
-                st.markdown("---")
-                st.subheader("2. Fecha y Código de Registro")
-                
-                col_fec_pick, col_fec_txt = st.columns(2)
-                with col_fec_pick:
-                    fecha_seleccionada = st.date_input("Seleccione la fecha:", value=date(2026, 4, 24))
-                with col_fec_txt:
-                    texto_fecha_auto = f"Maracaibo, {fecha_seleccionada.day} de {MESES_ES[fecha_seleccionada.month]} de {fecha_seleccionada.year}"
-                    lugar_fecha = st.text_input("Lugar y Fecha en el Certificado:", value=texto_fecha_auto)
-                
-                st.markdown("**Código de Registro / Control:**")
-                col_pref, col_corr = st.columns([2, 1])
-                
-                with col_pref:
-                    lista_prefijos = [f"{c['prefijo']} - {c.get('descripcion', '')}" for c in codigos_guardados]
-                    if not lista_prefijos:
-                        lista_prefijos = ["COQ-LCP-NPB - Nudo de Perseverancia en Bronce"]
-                    
-                    default_pref_idx = 0
-                    if condec_obj:
-                        nom_words = set(w for w in condec_obj["nombre"].lower().replace("de ", "").replace("en ", "").split() if len(w) > 2)
-                        for idx_c, c_item in enumerate(codigos_guardados):
-                            desc_words = set(w for w in c_item.get("descripcion", "").lower().replace("de ", "").replace("en ", "").split() if len(w) > 2)
-                            if nom_words and len(nom_words.intersection(desc_words)) >= 2:
-                                default_pref_idx = idx_c
-                                break
-                    
-                    pref_sel = st.selectbox("Prefijo Oficial (Distrito-Grupo-Siglas):", lista_prefijos, index=default_pref_idx)
-                    prefijo_puro = pref_sel.split(" - ")[0].strip()
-                    
-                with col_corr:
-                    correlativo = st.number_input("N° Correlativo:", min_value=1, max_value=999, value=1, step=1)
-                    
-                ano_str = str(fecha_seleccionada.year)
-                mes_str = f"{fecha_seleccionada.month:02d}"
-                num_str = f"{correlativo:03d}"
-                codigo_armado = f"{prefijo_puro}-{ano_str}-{mes_str}-{num_str}"
-                
-                codigo_control_final = st.text_input("Código de Control Final (editable):", value=codigo_armado)
-                st.caption(f"Estructura: `{prefijo_puro}` + `{ano_str}` + `{mes_str}` + `{num_str}`")
-                    
-                st.markdown("---")
-                st.subheader("3. Firmantes Oficiales")
-                
-                nombres_firmantes = ["(Ninguno)"] + [f["nombre"] for f in firmantes]
-                col_izq, col_der = st.columns(2)
-                with col_izq:
-                    firmante_izq_nombre = st.selectbox("Firmante Izquierdo:", nombres_firmantes, index=1 if len(nombres_firmantes) > 1 else 0)
-                with col_der:
-                    firmante_der_nombre = st.selectbox("Firmante Derecho:", nombres_firmantes, index=2 if len(nombres_firmantes) > 2 else (1 if len(nombres_firmantes) > 1 else 0))
-                    
-                firmante_izq_obj = next((f for f in firmantes if f["nombre"] == firmante_izq_nombre), None)
-                firmante_der_obj = next((f for f in firmantes if f["nombre"] == firmante_der_nombre), None)
-                
-                btn_generar = st.button("⚜️ Generar Certificado Oficial", type="primary", use_container_width=True)
-                
-            with col_prev:
-                st.subheader("Vista Previa y Descarga")
-                
-                if btn_generar or "ultimo_pdf" not in st.session_state:
-                    if condec_obj and nombre_galardonado.strip():
-                        ruta_template = os.path.join(PLANTILLAS_DIR, condec_obj["archivo_pdf"])
-                        if os.path.exists(ruta_template):
-                            with st.spinner("Procesando documento oficial..."):
-                                pdf_bytes = generar_certificado_pdf(
-                                    template_path=ruta_template,
-                                    nombre=nombre_galardonado,
-                                    cedula=cedula,
-                                    lugar_fecha=lugar_fecha,
-                                    codigo_control=codigo_control_final,
-                                    firmante_izq=firmante_izq_obj,
-                                    firmante_der=firmante_der_obj,
-                                    firmas_dir=FIRMAS_DIR,
-                                    config=condec_obj.get("config")
-                                )
-                                st.session_state["ultimo_pdf"] = pdf_bytes
-                                st.session_state["ultimo_nombre"] = nombre_galardonado.strip().replace(" ", "_")
-                                
-                                if btn_generar:
-                                    registrar_emision(
-                                        nombre=nombre_galardonado,
-                                        cedula=cedula,
-                                        condecoracion=condec_obj["nombre"],
-                                        codigo=codigo_control_final,
-                                        lugar_fecha=lugar_fecha,
-                                        firmante_izq=firmante_izq_obj,
-                                        firmante_der=firmante_der_obj
-                                    )
-                        else:
-                            st.error(f"El archivo de plantilla '{condec_obj['archivo_pdf']}' no existe.")
-                
-                if "ultimo_pdf" in st.session_state:
-                    img_preview = pdf_to_image_bytes(st.session_state["ultimo_pdf"])
-                    st.image(img_preview, caption="Vista previa del certificado generado", use_container_width=True)
-                    
-                    nombre_descarga = f"Certificado_{st.session_state.get('ultimo_nombre', 'Condecoracion')}.pdf"
-                    st.download_button(
-                        label="📥 Descargar Certificado Oficial en PDF",
-                        data=st.session_state["ultimo_pdf"],
-                        file_name=nombre_descarga,
-                        mime="application/pdf",
-                        type="primary",
-                        use_container_width=True
-                    )
+        emitir_lote(condecoraciones, firmantes, codigos)
 
-        # MODO MASIVO POR LOTE
-        else:
-            st.subheader("⚡ Emisión Masiva de Certificados por Lote")
-            st.markdown("""
-            Esta herramienta te permite emitir decenas de condecoraciones a la vez a partir de una lista en Excel o CSV.
-            El Excel puede llevar: **Nombre**, **Cédula** (con o sin puntos), y opcionalmente **Condecoración** y **Correlativo**.
-            """)
-            
-            buf_ejemplo = crear_excel_ejemplo()
-            st.download_button(
-                label="📄 Descargar Plantilla Excel de Ejemplo (.xlsx)",
-                data=buf_ejemplo,
-                file_name="plantilla_condecoraciones_scouts.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-            
-            st.markdown("---")
-            col_lote_cfg, col_lote_file = st.columns([1, 1], gap="large")
-            
-            with col_lote_cfg:
-                st.markdown("#### Configuración Predeterminada del Lote")
-                nombres_condec = [c["nombre"] for c in condecoraciones]
-                condec_lote_sel = st.selectbox(
-                    "Condecoración (para filas sin condecoración explícita):",
-                    nombres_condec,
-                    key="condec_lote"
-                )
-                condec_lote_obj = next((c for c in condecoraciones if c["nombre"] == condec_lote_sel), None)
-                
-                col_lf_p, col_lf_t = st.columns(2)
-                with col_lf_p:
-                    fec_lote = st.date_input("Fecha de emisión:", value=date(2026, 4, 24), key="fec_lote")
-                with col_lf_t:
-                    txt_fec_lote = f"Maracaibo, {fec_lote.day} de {MESES_ES[fec_lote.month]} de {fec_lote.year}"
-                    lugar_fecha_lote = st.text_input("Lugar y Fecha:", value=txt_fec_lote, key="lf_lote_txt")
-                
-                lista_prefijos = [f"{c['prefijo']} - {c.get('descripcion', '')}" for c in codigos_guardados]
-                pref_lote_sel = st.selectbox("Prefijo Oficial para el Lote:", lista_prefijos, key="pref_lote")
-                prefijo_lote_puro = pref_lote_sel.split(" - ")[0].strip()
-                
-                st.markdown("#### Firmantes Oficiales para el Lote")
-                nombres_firmantes = ["(Ninguno)"] + [f["nombre"] for f in firmantes]
-                col_fl_izq, col_fl_der = st.columns(2)
-                with col_fl_izq:
-                    fl_izq_nombre = st.selectbox("Firmante Izq:", nombres_firmantes, index=1 if len(nombres_firmantes) > 1 else 0, key="fl_izq")
-                with col_fl_der:
-                    fl_der_nombre = st.selectbox("Firmante Der:", nombres_firmantes, index=2 if len(nombres_firmantes) > 2 else 0, key="fl_der")
-                    
-                firm_lote_izq = next((f for f in firmantes if f["nombre"] == fl_izq_nombre), None)
-                firm_lote_der = next((f for f in firmantes if f["nombre"] == fl_der_nombre), None)
-                
-            with col_lote_file:
-                st.markdown("#### Cargar Archivo de Galardonados")
-                archivo_lote = st.file_uploader("Subir archivo Excel (.xlsx) o CSV:", type=["xlsx", "xls", "csv"])
-                
-                if archivo_lote:
-                    try:
-                        filas_cargadas = leer_archivo_lote(archivo_lote)
-                        if not filas_cargadas:
-                            st.error("No se encontraron filas con datos en el archivo subido.")
-                        else:
-                            for f in filas_cargadas:
-                                if "Cedula" in f:
-                                    f["Cedula"] = formatear_cedula_vzla(f["Cedula"])
-                            st.success(f"Archivo cargado: **{len(filas_cargadas)} personas** detectadas (cédulas formateadas automáticamente).")
-                            st.dataframe(filas_cargadas[:10], use_container_width=True)
-                            
-                            btn_procesar_lote = st.button("🚀 Procesar y Generar Lote Completo", type="primary", use_container_width=True)
-                            
-                            if btn_procesar_lote:
-                                progreso = st.progress(0)
-                                status_txt = st.empty()
-                                
-                                lista_pdfs_bytes = []
-                                lista_para_zip = []
-                                ano_str = str(fec_lote.year)
-                                mes_str = f"{fec_lote.month:02d}"
-                                total_filas = len(filas_cargadas)
-                                
-                                for i, row in enumerate(filas_cargadas):
-                                    status_txt.text(f"Generando certificado {i+1} de {total_filas}...")
-                                    nom_persona = str(row.get("Nombre", "")).strip().upper()
-                                    ced_persona = formatear_cedula_vzla(str(row.get("Cedula", "")))
-                                    
-                                    condec_fila_nombre = str(row.get("Condecoracion", "")).strip()
-                                    target_condec = None
-                                    if condec_fila_nombre:
-                                        target_condec = next((c for c in condecoraciones if condec_fila_nombre.lower() in c["nombre"].lower()), None)
-                                    if not target_condec:
-                                        target_condec = condec_lote_obj
-                                        
-                                    ruta_template = os.path.join(PLANTILLAS_DIR, target_condec["archivo_pdf"])
-                                    if not os.path.exists(ruta_template):
-                                        st.warning(f"Plantilla '{target_condec['archivo_pdf']}' no encontrada para {nom_persona}. Saltando...")
-                                        continue
-                                        
-                                    num_corr = row.get("Correlativo", i + 1)
-                                    try:
-                                        num_corr_int = int(num_corr)
-                                    except:
-                                        num_corr_int = i + 1
-                                    cod_armado = f"{prefijo_lote_puro}-{ano_str}-{mes_str}-{num_corr_int:03d}"
-                                    
-                                    pdf_ind = generar_certificado_pdf(
-                                        template_path=ruta_template,
-                                        nombre=nom_persona,
-                                        cedula=ced_persona,
-                                        lugar_fecha=lugar_fecha_lote,
-                                        codigo_control=cod_armado,
-                                        firmante_izq=firm_lote_izq,
-                                        firmante_der=firm_lote_der,
-                                        firmas_dir=FIRMAS_DIR,
-                                        config=target_condec.get("config")
-                                    )
-                                    lista_pdfs_bytes.append(pdf_ind)
-                                    nombre_archivo_ind = f"Certificado_{num_corr_int:03d}_{nom_persona.replace(' ', '_')}.pdf"
-                                    lista_para_zip.append((nombre_archivo_ind, pdf_ind))
-                                    
-                                    registrar_emision(
-                                        nombre=nom_persona,
-                                        cedula=ced_persona,
-                                        condecoracion=target_condec["nombre"],
-                                        codigo=cod_armado,
-                                        lugar_fecha=lugar_fecha_lote,
-                                        firmante_izq=firm_lote_izq,
-                                        firmante_der=firm_lote_der
-                                    )
-                                    progreso.progress((i + 1) / total_filas)
-                                    
-                                if lista_pdfs_bytes:
-                                    status_txt.success(f"¡{len(lista_pdfs_bytes)} certificados generados con éxito!")
-                                    pdf_unificado = unir_certificados_pdf(lista_pdfs_bytes)
-                                    zip_individuales = crear_zip_certificados(lista_para_zip)
-                                    
-                                    st.markdown("---")
-                                    st.markdown("### 📥 Descargas del Lote")
-                                    col_d1, col_d2 = st.columns(2)
-                                    with col_d1:
-                                        st.download_button(
-                                            label=f"📄 Descargar Todo en 1 Solo PDF ({len(lista_pdfs_bytes)} páginas)",
-                                            data=pdf_unificado,
-                                            file_name=f"Lote_Condecoraciones_{fec_lote.strftime('%Y%m%d')}.pdf",
-                                            mime="application/pdf",
-                                            type="primary",
-                                            use_container_width=True
-                                        )
-                                    with col_d2:
-                                        st.download_button(
-                                            label=f"📦 Descargar Archivo ZIP (PDFs individuales)",
-                                            data=zip_individuales,
-                                            file_name=f"Lote_Condecoraciones_{fec_lote.strftime('%Y%m%d')}.zip",
-                                            mime="application/zip",
-                                            use_container_width=True
-                                        )
-                    except Exception as e:
-                        st.error(f"Error al procesar el archivo: {e}")
 
 # -------------------------------------------------------------------------
-# TAB 2: LIBRO DE REGISTRO (ART. 35) - CON RE-DESCARGA Y BORRADO INDIVIDUAL
+# VISTA: LIBRO DE REGISTRO
 # -------------------------------------------------------------------------
-with tab2:
+def vista_registro():
     st.subheader("📖 Libro de Registro Oficial de Condecoraciones y Distinciones")
     st.markdown("""
     > *Cumplimiento del **Artículo 35 del Reglamento Oficial**: Se hace constar el registro oficial de cada condecoración otorgada, antecedentes, fecha y número de certificado.*
     """)
-    
-    registro_actual = cargar_registro()
-    condecoraciones_disp = cargar_condecoraciones()
-    firmantes_disp = cargar_firmantes()
-    
-    if registro_actual:
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Total Condecoraciones Emitidas", len(registro_actual))
-        m2.metric("Última Emisión", registro_actual[0]["fecha_registro"][:10] if registro_actual else "-")
-        condec_unicas = len(set(r.get("condecoracion", "") for r in registro_actual))
-        m3.metric("Condecoraciones Diferentes", condec_unicas)
-        
-        st.markdown("---")
-        
-        col_filtro, col_exp = st.columns([3, 1])
-        with col_filtro:
-            texto_busqueda = st.text_input("🔍 Buscar por Nombre, Cédula o Código de Registro:", placeholder="ej. Silverio, 11.289.602, NPB...")
-        with col_exp:
-            buf_excel = exportar_registro_excel(registro_actual)
-            st.download_button(
-                label="📥 Exportar a Excel (.xlsx)",
-                data=buf_excel,
-                file_name=f"Libro_Registro_Condecoraciones_ASV_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
-                use_container_width=True
-            )
-            
-        if texto_busqueda.strip():
-            filtro = texto_busqueda.strip().lower()
-            mostrar = [
-                r for r in registro_actual
-                if filtro in r.get("nombre", "").lower()
-                or filtro in r.get("cedula", "").lower()
-                or filtro in r.get("codigo", "").lower()
-                or filtro in r.get("condecoracion", "").lower()
-            ]
-        else:
-            mostrar = registro_actual
+    registro = cargar_registro()
+    condecoraciones = cargar_condecoraciones()
+    firmantes = cargar_firmantes()
 
-        st.markdown("### 📋 Listado de Emisiones (Re-descarga y Gestión Individual)")
-        for idx_r, reg_item in enumerate(mostrar):
-            with st.container():
-                c_det, c_act1, c_act2 = st.columns([4, 1.5, 1])
-                with c_det:
-                    st.markdown(f"**{reg_item.get('nombre', '')}** — `C.I. {reg_item.get('cedula', '')}`")
-                    st.caption(
-                        f"🏅 **{reg_item.get('condecoracion', '')}** | "
-                        f"🏷️ Código: `{reg_item.get('codigo', '')}` | "
-                        f"📅 {reg_item.get('lugar_fecha', '')}"
-                    )
-                with c_act1:
-                    if st.button("🔄 Generar Copia PDF", key=f"reprint_{idx_r}_{reg_item.get('codigo','')}", use_container_width=True):
-                        condec_match = next((c for c in condecoraciones_disp if c["nombre"].lower() == reg_item.get("condecoracion", "").lower()), None)
-                        if not condec_match and condecoraciones_disp:
-                            condec_match = condecoraciones_disp[0]
-                        if condec_match:
-                            ruta_tpl = os.path.join(PLANTILLAS_DIR, condec_match["archivo_pdf"])
-                            if os.path.exists(ruta_tpl):
-                                f_izq_obj = next((f for f in firmantes_disp if f["nombre"] == reg_item.get("firmante_izq")), None)
-                                f_der_obj = next((f for f in firmantes_disp if f["nombre"] == reg_item.get("firmante_der")), None)
-                                pdf_copia = generar_certificado_pdf(
-                                    template_path=ruta_tpl,
-                                    nombre=reg_item.get("nombre", ""),
-                                    cedula=reg_item.get("cedula", ""),
-                                    lugar_fecha=reg_item.get("lugar_fecha", ""),
-                                    codigo_control=reg_item.get("codigo", ""),
-                                    firmante_izq=f_izq_obj,
-                                    firmante_der=f_der_obj,
-                                    firmas_dir=FIRMAS_DIR,
-                                    config=condec_match.get("config")
-                                )
-                                st.session_state["copia_pdf_bytes"] = pdf_copia
-                                st.session_state["copia_pdf_nombre"] = f"Copia_{reg_item.get('nombre','').replace(' ','_')}_{reg_item.get('codigo','')}.pdf"
-                            else:
-                                st.error("Plantilla PDF no encontrada.")
-                        else:
-                            st.error("No hay plantillas cargadas para regenerar.")
-                with c_act2:
-                    if st.button("🗑️ Borrar", key=f"del_reg_{idx_r}_{reg_item.get('codigo','')}", use_container_width=True):
-                        registro_actual.remove(reg_item)
-                        guardar_registro(registro_actual)
-                        st.success("Registro eliminado.")
-                        st.rerun()
+    if not registro:
+        st.info("Aún no se han emitido certificados. Cuando se emita el primero aparecerá aquí automáticamente.")
+        return
 
-                expected_copy_name = f"Copia_{reg_item.get('nombre','').replace(' ','_')}_{reg_item.get('codigo','')}.pdf"
-                if st.session_state.get("copia_pdf_nombre") == expected_copy_name:
-                    st.download_button(
-                        label=f"📥 Descargar Copia PDF ({reg_item.get('nombre', '')})",
-                        data=st.session_state["copia_pdf_bytes"],
-                        file_name=expected_copy_name,
-                        mime="application/pdf",
-                        key=f"dl_copy_{idx_r}"
-                    )
-                st.divider()
-        
-        with st.expander("🗑️ Opciones de Mantenimiento General"):
-            if st.button("Limpiar Historial Completo (Borrar todo el registro)"):
-                guardar_registro([])
-                st.success("Historial reiniciado.")
-                st.rerun()
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Total de condecoraciones emitidas", len(registro))
+    m2.metric("Última emisión", str(registro[0].get("fecha_registro", "-"))[:10])
+    m3.metric("Condecoraciones diferentes", len(set(r.get("condecoracion", "") for r in registro)))
+    st.markdown("---")
+
+    col_filtro, col_exp = st.columns([3, 1])
+    with col_filtro:
+        busqueda = st.text_input("🔍 Buscar por nombre, cédula, código o condecoración:",
+                                 placeholder="ej. Silverio, 11.289.602, NPB...")
+    with col_exp:
+        st.download_button(
+            label="📥 Exportar a Excel (.xlsx)",
+            data=exportar_registro_excel(registro),
+            file_name=f"Libro_Registro_Condecoraciones_ASV_{ahora().strftime('%Y%m%d')}.xlsx",
+            mime=MIME_XLSX,
+            type="primary",
+        )
+
+    if busqueda.strip():
+        filtro = normalizar(busqueda)
+        mostrar = [
+            r for r in registro
+            if filtro in normalizar(r.get("nombre", ""))
+            or filtro in normalizar(r.get("cedula", ""))
+            or filtro.replace(".", "") in str(r.get("cedula", "")).replace(".", "")
+            or filtro in normalizar(r.get("codigo", ""))
+            or filtro in normalizar(r.get("condecoracion", ""))
+        ]
     else:
-        st.info("Aún no se han emitido certificados. Cuando generes el primero (individual o por lote), aparecerá registrado aquí automáticamente.")
+        mostrar = registro
+
+    st.markdown(f"### 📋 Listado de emisiones ({len(mostrar)})")
+    for idx, item in enumerate(mostrar):
+        clave = f"{idx}_{item.get('id', item.get('codigo', ''))}"
+        nombre_copia = f"Copia_{slug(item.get('nombre', ''))}_{item.get('codigo', '')}.pdf"
+        c_det, c_a1, c_a2 = st.columns([4, 1.5, 1])
+        with c_det:
+            st.markdown(f"**{item.get('nombre', '')}** — `C.I. {item.get('cedula', '')}`")
+            emitido_por = f" | 👤 {item['emitido_por']}" if item.get("emitido_por") else ""
+            st.caption(
+                f"🏅 **{item.get('condecoracion', '')}** | 🏷️ Código: `{item.get('codigo', '')}` | "
+                f"📅 {item.get('lugar_fecha', '')}{emitido_por}"
+            )
+        with c_a1:
+            if st.button("🔄 Generar copia PDF", key=f"reprint_{clave}"):
+                condec = next((c for c in condecoraciones if c.get("id") == item.get("condecoracion_id")), None)
+                if not condec:
+                    condec = next((c for c in condecoraciones
+                                   if normalizar(c["nombre"]) == normalizar(item.get("condecoracion", ""))), None)
+                if not condec:
+                    st.error(f"El formato «{item.get('condecoracion', '')}» ya no existe. No se puede generar la copia.")
+                else:
+                    ruta_tpl = os.path.join(PLANTILLAS_DIR, condec["archivo_pdf"])
+                    if not os.path.exists(ruta_tpl):
+                        st.error("Plantilla PDF no encontrada.")
+                    else:
+                        f_izq = next((f for f in firmantes if f["nombre"] == item.get("firmante_izq")), None)
+                        f_der = next((f for f in firmantes if f["nombre"] == item.get("firmante_der")), None)
+                        faltan = [n for n, o in ((item.get("firmante_izq"), f_izq), (item.get("firmante_der"), f_der)) if n and not o]
+                        if faltan:
+                            st.warning(f"Firmante(s) ya no registrados: {', '.join(faltan)}. La copia sale sin esa firma.")
+                        st.session_state["copia_pdf_bytes"] = generar_certificado_pdf(
+                            template_path=ruta_tpl, nombre=item.get("nombre", ""), cedula=item.get("cedula", ""),
+                            lugar_fecha=item.get("lugar_fecha", ""), codigo_control=item.get("codigo", ""),
+                            firmante_izq=f_izq, firmante_der=f_der,
+                            firmas_dir=FIRMAS_DIR, config=condec.get("config"),
+                        )
+                        st.session_state["copia_pdf_nombre"] = nombre_copia
+        with c_a2:
+            if puede("anular") and st.button("🗑️ Borrar", key=f"del_reg_{clave}"):
+                guardar_registro([r for r in registro if r is not item])
+                avisar(f"Registro {item.get('codigo', '')} eliminado.")
+                st.rerun()
+
+        if st.session_state.get("copia_pdf_nombre") == nombre_copia:
+            st.download_button(
+                label=f"📥 Descargar copia PDF ({item.get('nombre', '')})",
+                data=st.session_state["copia_pdf_bytes"],
+                file_name=nombre_copia,
+                mime="application/pdf",
+                key=f"dl_copy_{clave}",
+            )
+        st.divider()
+
+    if puede("limpiar"):
+        with st.expander("🗑️ Mantenimiento general (solo Administrador)"):
+            st.warning("Esto borra TODO el Libro de Registro. Descarga antes un respaldo o el Excel.")
+            confirmar = st.checkbox("Entiendo que esta acción no se puede deshacer.", key="confirmar_limpiar")
+            if st.button("Limpiar historial completo", disabled=not confirmar):
+                guardar_registro([])
+                avisar("Historial reiniciado.")
+                st.rerun()
+
 
 # -------------------------------------------------------------------------
-# TAB 3: CÓDIGOS DE CONTROL
+# VISTA: CÓDIGOS DE CONTROL
 # -------------------------------------------------------------------------
-with tab3:
-    st.subheader("Configuración de Prefijos para Códigos de Control")
+def vista_codigos():
+    st.subheader("Configuración de prefijos para códigos de control")
     st.markdown("""
     Los códigos oficiales se arman con la siguiente estructura:
     - **Parte 1 (Distrito):** ej. `COQ`
     - **Parte 2 (Grupo Scout):** ej. `LCP`
-    - **Parte 3 (Siglas de Condecoración):** ej. `NPB` (Nudo de Perseverancia en Bronce)
-    - **Parte 4 y 5 (Año y Mes):** Se toman automáticamente de la fecha del certificado (ej. `2026-04`)
-    - **Parte 6 (Correlativo):** El número de condecoración entregado ese mes colocado a mano o automático (ej. `001`)
+    - **Parte 3 (Siglas de la condecoración):** ej. `NPB` (Nudo de Perseverancia en Bronce)
+    - **Partes 4 y 5 (Año y mes):** se toman de la fecha del certificado (ej. `2026-04`)
+    - **Parte 6 (Correlativo):** siguiente número libre de ese mes, o el que escribas (ej. `001`)
     """)
-    st.info("Aquí defines los prefijos de las 3 primeras partes para tenerlos listos en el formulario.")
-    
-    codigos_actuales = cargar_codigos()
-    
-    if codigos_actuales:
-        st.markdown(f"### Prefijos Registrados ({len(codigos_actuales)} disponibles)")
-        
-        busq_cod = st.text_input("Filtrar prefijos por nombre o sigla:", placeholder="ej. Nudo, Barra, Oro, Bronce...")
-        lista_mostrar = codigos_actuales
-        if busq_cod.strip():
-            b = busq_cod.strip().lower()
-            lista_mostrar = [c for c in codigos_actuales if b in c["prefijo"].lower() or b in c.get("descripcion", "").lower()]
-            
-        for idx, c in enumerate(lista_mostrar):
-            with st.container():
-                col_c1, col_c2, col_c3 = st.columns([3, 2, 1])
-                with col_c1:
-                    st.markdown(f"**Prefijo:** `{c['prefijo']}`")
-                    st.caption(f"Descripción: {c.get('descripcion', 'Sin descripción')}")
-                with col_c2:
-                    st.markdown(f"Distrito: **{c.get('distrito','')}** | Grupo: **{c.get('grupo','')}** | Siglas: **{c.get('siglas','')}**")
-                with col_c3:
-                    if st.button("🗑️ Eliminar", key=f"del_cod_{idx}"):
-                        codigos_actuales.remove(c)
-                        guardar_codigos(codigos_actuales)
-                        st.success("Prefijo eliminado.")
-                        st.rerun()
-                st.divider()
+    codigos = cargar_codigos()
+
+    if codigos:
+        st.markdown(f"### Prefijos registrados ({len(codigos)})")
+        busq = st.text_input("Filtrar por nombre o sigla:", placeholder="ej. Nudo, Barra, Oro, Bronce...")
+        lista = codigos
+        if busq.strip():
+            b = normalizar(busq)
+            lista = [c for c in codigos if b in normalizar(c["prefijo"]) or b in normalizar(c.get("descripcion", ""))]
+        for idx, c in enumerate(lista):
+            c1, c2, c3 = st.columns([3, 2, 1])
+            with c1:
+                st.markdown(f"**Prefijo:** `{c['prefijo']}`")
+                st.caption(f"Descripción: {c.get('descripcion', 'Sin descripción')}")
+            with c2:
+                st.markdown(f"Distrito: **{c.get('distrito', '')}** | Grupo: **{c.get('grupo', '')}** | Siglas: **{c.get('siglas', '')}**")
+            with c3:
+                if st.button("🗑️ Eliminar", key=f"del_cod_{idx}_{c['prefijo']}"):
+                    guardar_codigos([x for x in codigos if x is not c])
+                    avisar(f"Prefijo {c['prefijo']} eliminado.")
+                    st.rerun()
+            st.divider()
     else:
         st.write("No hay prefijos registrados.")
-        
-    st.subheader("➕ Registrar Nuevo Prefijo de Código")
+
+    st.subheader("➕ Registrar nuevo prefijo")
     with st.form("form_nuevo_codigo", clear_on_submit=True):
-        col_d, col_g, col_s = st.columns(3)
-        with col_d:
-            nuevo_distrito = st.text_input("1. Distrito (ej. COQ):", max_chars=10).upper()
-        with col_g:
-            nuevo_grupo = st.text_input("2. Grupo Scout (ej. LCP):", max_chars=10).upper()
-        with col_s:
-            nuevas_siglas = st.text_input("3. Siglas Condecoración (ej. NPB):", max_chars=10).upper()
-            
-        nueva_desc = st.text_input("Descripción / Nombre de la Condecoración:", placeholder="ej. Nudo de Perseverancia en Bronce")
-        
-        btn_guardar_codigo = st.form_submit_button("Guardar Prefijo", type="primary")
-        if btn_guardar_codigo:
-            if not nuevo_distrito.strip() or not nuevo_grupo.strip() or not nuevas_siglas.strip():
-                st.error("Por favor completa los 3 campos del código (Distrito, Grupo y Siglas).")
+        c_d, c_g, c_s = st.columns(3)
+        with c_d:
+            distrito = st.text_input("1. Distrito (ej. COQ):", max_chars=10)
+        with c_g:
+            grupo = st.text_input("2. Grupo Scout (ej. LCP):", max_chars=10)
+        with c_s:
+            siglas = st.text_input("3. Siglas de la condecoración (ej. NPB):", max_chars=10)
+        desc = st.text_input("Descripción / nombre de la condecoración:", placeholder="ej. Nudo de Perseverancia en Bronce")
+        if st.form_submit_button("Guardar prefijo", type="primary"):
+            partes = [re.sub(r"[^A-Z0-9]", "", sin_acentos(p).upper()) for p in (distrito, grupo, siglas)]
+            if not all(partes):
+                st.error("Completa los 3 campos del código (solo letras y números).")
             else:
-                prefijo_generado = f"{nuevo_distrito.strip()}-{nuevo_grupo.strip()}-{nuevas_siglas.strip()}"
-                codigos_actuales.append({
-                    "id": prefijo_generado.lower().replace("-", "_"),
-                    "distrito": nuevo_distrito.strip(),
-                    "grupo": nuevo_grupo.strip(),
-                    "siglas": nuevas_siglas.strip(),
-                    "prefijo": prefijo_generado,
-                    "descripcion": nueva_desc.strip() or prefijo_generado
-                })
-                guardar_codigos(codigos_actuales)
-                st.success(f"¡Prefijo '{prefijo_generado}' registrado exitosamente!")
-                st.rerun()
+                prefijo = "-".join(partes)
+                if any(c["prefijo"] == prefijo for c in codigos):
+                    st.error(f"El prefijo {prefijo} ya existe.")
+                else:
+                    codigos.append({
+                        "id": prefijo.lower().replace("-", "_"),
+                        "distrito": partes[0], "grupo": partes[1], "siglas": partes[2],
+                        "prefijo": prefijo, "descripcion": desc.strip() or prefijo,
+                    })
+                    guardar_codigos(codigos)
+                    avisar(f"Prefijo {prefijo} registrado.")
+                    st.rerun()
+
 
 # -------------------------------------------------------------------------
-# TAB 4: GESTIÓN DE FIRMANTES
+# VISTA: FIRMANTES
 # -------------------------------------------------------------------------
-with tab4:
-    st.subheader("Autoridades y Firmantes Registrados")
-    st.info("Aquí puedes cargar a los dirigentes y autoridades que firman las condecoraciones con sus cargos y firmas digitalizadas.")
-    
-    firmantes_actuales = cargar_firmantes()
-    
-    if firmantes_actuales:
-        for idx, f in enumerate(firmantes_actuales):
-            with st.container():
-                col_info, col_img, col_del = st.columns([3, 2, 1])
-                with col_info:
-                    st.markdown(f"**Nombre:** {f['nombre']}")
-                    st.markdown(f"**Cargo:** {f['cargo']}")
-                    st.markdown(f"**Institución:** {f.get('entidad', 'Asociación de Scouts de Venezuela')}")
-                with col_img:
-                    ruta_img = os.path.join(FIRMAS_DIR, f.get("archivo_firma", ""))
-                    if os.path.exists(ruta_img):
-                        st.image(ruta_img, width=150, caption="Firma Digitalizada")
-                    else:
-                        st.caption("Sin imagen de firma")
-                with col_del:
-                    if st.button("🗑️ Eliminar", key=f"del_firm_{idx}"):
-                        firmantes_actuales.pop(idx)
-                        guardar_firmantes(firmantes_actuales)
-                        st.success("Firmante eliminado.")
-                        st.rerun()
-                st.divider()
+def vista_firmantes():
+    st.subheader("Autoridades y firmantes registrados")
+    st.info("Dirigentes y autoridades que firman las condecoraciones, con sus cargos y firmas digitalizadas.")
+    firmantes = cargar_firmantes()
+
+    if firmantes:
+        for idx, f in enumerate(firmantes):
+            c_info, c_img, c_del = st.columns([3, 2, 1])
+            with c_info:
+                st.markdown(f"**Nombre:** {f['nombre']}")
+                st.markdown(f"**Cargo:** {f['cargo']}")
+                st.markdown(f"**Institución:** {f.get('entidad', 'Asociación de Scouts de Venezuela')}")
+            with c_img:
+                ruta_img = os.path.join(FIRMAS_DIR, f.get("archivo_firma") or "_")
+                if os.path.isfile(ruta_img):
+                    st.image(ruta_img, width=150, caption="Firma digitalizada")
+                else:
+                    st.caption("Sin imagen de firma")
+            with c_del:
+                if st.button("🗑️ Eliminar", key=f"del_firm_{idx}_{f.get('id', '')}"):
+                    guardar_firmantes([x for x in firmantes if x is not f])
+                    avisar(f"Firmante «{f['nombre']}» eliminado.")
+                    st.rerun()
+            st.divider()
     else:
         st.write("No hay firmantes registrados.")
-        
-    st.subheader("➕ Agregar Nuevo Firmante")
+
+    st.subheader("➕ Agregar nuevo firmante")
     with st.form("form_nuevo_firmante", clear_on_submit=True):
-        nuevo_nombre = st.text_input("Nombre Completo:")
-        nuevo_cargo = st.text_input("Cargo Oficial:", placeholder="ej. JEFE DE GRUPO, COMISIONADO DISTRITAL")
-        nueva_entidad = st.text_input("Institución / Entidad:", value="Asociación de Scouts de Venezuela")
-        archivo_firma = st.file_uploader("Imagen de la Firma (PNG con fondo transparente recomendado):", type=["png", "jpg", "jpeg"])
-        
-        btn_guardar_firmante = st.form_submit_button("Guardar Firmante", type="primary")
-        if btn_guardar_firmante:
-            if not nuevo_nombre.strip() or not nuevo_cargo.strip():
-                st.error("Por favor ingresa al menos el nombre y el cargo.")
+        nombre = st.text_input("Nombre completo:")
+        cargo = st.text_input("Cargo oficial:", placeholder="ej. JEFE DE GRUPO, COMISIONADO DISTRITAL")
+        entidad = st.text_input("Institución / entidad:", value="Asociación de Scouts de Venezuela")
+        archivo = st.file_uploader("Imagen de la firma (PNG con fondo transparente recomendado):", type=["png", "jpg", "jpeg"])
+        if st.form_submit_button("Guardar firmante", type="primary"):
+            if not nombre.strip() or not cargo.strip():
+                st.error("Ingresa al menos el nombre y el cargo.")
+            elif any(normalizar(f["nombre"]) == normalizar(nombre) for f in firmantes):
+                st.error("Ya existe un firmante con ese nombre.")
             else:
                 nombre_archivo = ""
-                if archivo_firma:
-                    nombre_archivo = f"{nuevo_nombre.lower().replace(' ', '_')}_{archivo_firma.name}"
-                    ruta_destino = os.path.join(FIRMAS_DIR, nombre_archivo)
-                    with open(ruta_destino, "wb") as f_out:
-                        f_out.write(archivo_firma.getbuffer())
-                
-                firmantes_actuales.append({
-                    "id": nuevo_nombre.lower().replace(" ", "_"),
-                    "nombre": nuevo_nombre.strip(),
-                    "cargo": nuevo_cargo.strip(),
-                    "entidad": nueva_entidad.strip(),
-                    "archivo_firma": nombre_archivo
+                if archivo:
+                    ext = os.path.splitext(archivo.name)[1].lower() or ".png"
+                    nombre_archivo = f"{slug(nombre)}{ext}"
+                    with open(os.path.join(FIRMAS_DIR, nombre_archivo), "wb") as f_out:
+                        f_out.write(archivo.getbuffer())
+                firmantes.append({
+                    "id": slug(nombre), "nombre": nombre.strip(), "cargo": cargo.strip(),
+                    "entidad": entidad.strip(), "archivo_firma": nombre_archivo,
                 })
-                guardar_firmantes(firmantes_actuales)
-                st.success(f"Firmante '{nuevo_nombre}' agregado correctamente.")
+                guardar_firmantes(firmantes)
+                avisar(f"Firmante «{nombre.strip()}» agregado.")
                 st.rerun()
 
+
 # -------------------------------------------------------------------------
-# TAB 5: GESTIÓN DE FORMATOS, PLANTILLAS WORD/PDF Y RESPALDO ZIP
+# VISTA: FORMATOS Y RESPALDO
 # -------------------------------------------------------------------------
-with tab5:
-    st.subheader("Catálogo de Condecoraciones y Formatos (PDF y Word)")
-    st.info("Puedes subir plantillas limpias en PDF o formatos en Word (.docx); si el Word tiene textos de relleno o ejemplo, la aplicación lo limpiará automáticamente.")
-    
-    condec_actuales = cargar_condecoraciones()
-    
-    if len(condec_actuales) > 1:
-        with st.expander("⚙️ Calibración por Lote (Copiar coordenadas a múltiples formatos)"):
-            st.markdown("""
-            Si tienes varios formatos que comparten la misma estructura oficial, puedes tomar la calibración de uno y aplicarla a todos los demás de un solo clic.
-            """)
-            col_m1, col_m2 = st.columns([1, 2])
-            with col_m1:
-                formato_modelo = st.selectbox("Copiar calibración DESDE:", [c["nombre"] for c in condec_actuales], key="modelo_lote")
-                formato_modelo_obj = next((c for c in condec_actuales if c["nombre"] == formato_modelo), None)
-            with col_m2:
-                formatos_destino = st.multiselect("Aplicar esta calibración HACIA los siguientes formatos:", [c["nombre"] for c in condec_actuales if c["nombre"] != formato_modelo], key="destinos_lote")
-            
-            if st.button("🚀 Aplicar Calibración a los Formatos Seleccionados", type="primary"):
-                if formato_modelo_obj and formatos_destino:
-                    cfg_copiar = formato_modelo_obj.get("config", DEFAULT_CONFIG).copy()
-                    for c in condec_actuales:
-                        if c["nombre"] in formatos_destino:
-                            c["config"] = cfg_copiar.copy()
-                    guardar_condecoraciones(condec_actuales)
-                    st.success(f"¡Calibración de '{formato_modelo}' aplicada exitosamente a {len(formatos_destino)} formatos!")
+def vista_formatos():
+    st.subheader("Catálogo de condecoraciones y formatos (PDF y Word)")
+    st.info("Sube plantillas limpias en PDF o formatos en Word (.docx). Los Word se limpian de textos de relleno y se convierten a PDF.")
+    condec = cargar_condecoraciones()
+    codigos = cargar_codigos()
+    prefijos = [c["prefijo"] for c in codigos]
+    descripciones = {c["prefijo"]: c.get("descripcion", "") for c in codigos}
+    AUTO = "(Automático por nombre)"
+
+    if len(condec) > 1:
+        with st.expander("⚙️ Calibración por lote (copiar coordenadas a varios formatos)"):
+            c_m1, c_m2 = st.columns([1, 2])
+            with c_m1:
+                modelo = st.selectbox("Copiar calibración DESDE:", [c["nombre"] for c in condec], key="modelo_lote")
+            with c_m2:
+                destinos = st.multiselect("Aplicar HACIA:", [c["nombre"] for c in condec if c["nombre"] != modelo], key="destinos_lote")
+            if st.button("🚀 Aplicar calibración a los formatos seleccionados", type="primary"):
+                modelo_obj = next((c for c in condec if c["nombre"] == modelo), None)
+                if modelo_obj and destinos:
+                    for c in condec:
+                        if c["nombre"] in destinos:
+                            c["config"] = dict(modelo_obj["config"])
+                    guardar_condecoraciones(condec)
+                    avisar(f"Calibración de «{modelo}» aplicada a {len(destinos)} formatos.")
                     st.rerun()
                 else:
                     st.warning("Selecciona al menos un formato de destino.")
-    
+
     st.markdown("---")
-    
-    if condec_actuales:
-        st.markdown(f"### Formatos Oficiales Registrados ({len(condec_actuales)})")
-        for idx, c in enumerate(condec_actuales):
-            cfg = c.get("config", DEFAULT_CONFIG.copy())
-            with st.container():
-                col_cinfo, col_cprev, col_cdel = st.columns([3, 2, 1])
-                with col_cinfo:
-                    st.markdown(f"### {c['nombre']}")
-                    st.caption(f"Archivo: `{c['archivo_pdf']}`")
-                with col_cprev:
-                    ruta_pdf = os.path.join(PLANTILLAS_DIR, c["archivo_pdf"])
-                    if os.path.exists(ruta_pdf):
-                        with open(ruta_pdf, "rb") as f_pdf:
-                            pdf_img = pdf_to_image_bytes(f_pdf.read())
-                            st.image(pdf_img, width=110, caption="Miniatura Formato")
-                with col_cdel:
-                    if st.button("🗑️ Eliminar Formato", key=f"del_condec_{idx}"):
-                        condec_actuales.pop(idx)
-                        guardar_condecoraciones(condec_actuales)
-                        st.success("Formato eliminado.")
-                        st.rerun()
-                
-                with st.expander(f"⚙️ Calibrar Posiciones para '{c['nombre']}'"):
-                    st.caption("Ajusta las coordenadas si este formato tiene los textos o firmas en otra posición.")
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.markdown("**Nombre y Cédula**")
-                        nuevo_nom_y = st.number_input(f"Altura Y del Nombre:", value=float(cfg.get("nombre_y", 467.0)), step=1.0, key=f"ny_{idx}")
-                        nuevo_nom_tam = st.number_input(f"Tamaño máx. Nombre:", value=int(cfg.get("nombre_tamano_max", 36)), step=1, key=f"nt_{idx}")
-                        nuevo_ced_x = st.number_input(f"Posición X Cédula:", value=float(cfg.get("cedula_x", 257.0)), step=1.0, key=f"cx_{idx}")
-                        nuevo_ced_y = st.number_input(f"Altura Y Cédula:", value=float(cfg.get("cedula_y", 435.1)), step=0.5, key=f"cy_{idx}")
-                        nuevo_ced_tam = st.number_input(f"Tamaño Cédula:", value=float(cfg.get("cedula_tamano", 16.5)), step=0.5, key=f"ct_{idx}")
-                    with col2:
-                        st.markdown("**Firmantes**")
-                        nuevo_fizq_x = st.number_input(f"Centro X Firmante Izq:", value=float(cfg.get("firmante_izq_x", 160.0)), step=2.0, key=f"fix_{idx}")
-                        nuevo_fder_x = st.number_input(f"Centro X Firmante Der:", value=float(cfg.get("firmante_der_x", 452.0)), step=2.0, key=f"fdx_{idx}")
-                        nuevo_f_y = st.number_input(f"Altura Y Firmas:", value=float(cfg.get("firmante_izq_y", 138.0)), step=2.0, key=f"fy_{idx}")
-                        nuevo_f_ancho = st.number_input(f"Ancho Firma:", value=float(cfg.get("ancho_firma", 135.0)), step=5.0, key=f"fa_{idx}")
-                    with col3:
-                        st.markdown("**Fecha y Código de Control**")
-                        nuevo_fec_y = st.number_input(f"Altura Y Fecha:", value=float(cfg.get("lugar_fecha_y", 90.0)), step=1.0, key=f"ly_{idx}")
-                        nuevo_cod_x = st.number_input(f"Centro X Código:", value=float(cfg.get("codigo_control_x", 178.2)), step=1.0, key=f"ccx_{idx}")
-                        nuevo_cod_y = st.number_input(f"Altura Y Código:", value=float(cfg.get("codigo_control_y", 65.5)), step=0.5, key=f"ccy_{idx}")
-                    
-                    if st.button("💾 Guardar Nueva Calibración", key=f"btn_save_cfg_{idx}", type="primary"):
-                        c["config"] = {
-                            "nombre_y": nuevo_nom_y,
-                            "nombre_tamano_max": nuevo_nom_tam,
-                            "cedula_x": nuevo_ced_x,
-                            "cedula_y": nuevo_ced_y,
-                            "cedula_tamano": nuevo_ced_tam,
-                            "firmante_izq_x": nuevo_fizq_x,
-                            "firmante_izq_y": nuevo_f_y,
-                            "firmante_der_x": nuevo_fder_x,
-                            "firmante_der_y": nuevo_f_y,
-                            "ancho_firma": nuevo_f_ancho,
-                            "lugar_fecha_y": nuevo_fec_y,
-                            "codigo_control_x": nuevo_cod_x,
-                            "codigo_control_y": nuevo_cod_y,
-                            "codigo_control_tamano": cfg.get("codigo_control_tamano", 7.5)
-                        }
-                        guardar_condecoraciones(condec_actuales)
-                        st.success(f"¡Configuración de '{c['nombre']}' guardada correctamente!")
-                        st.rerun()
-                st.divider()
+
+    if condec:
+        st.markdown(f"### Formatos oficiales registrados ({len(condec)})")
+        for idx, c in enumerate(condec):
+            cfg = c["config"]
+            k = f"{idx}_{c['id']}"
+            c_info, c_prev, c_del = st.columns([3, 2, 1])
+            with c_info:
+                st.markdown(f"### {c['nombre']}")
+                pref_actual = prefijo_de(c, codigos)
+                origen = "asignado" if c.get("prefijo") in prefijos else "automático"
+                st.caption(f"Archivo: `{c['archivo_pdf']}` · Prefijo: `{pref_actual or 'sin prefijo'}` ({origen})")
+            with c_prev:
+                ruta_pdf = os.path.join(PLANTILLAS_DIR, c["archivo_pdf"])
+                if os.path.exists(ruta_pdf):
+                    st.image(miniatura_pdf(ruta_pdf, os.path.getmtime(ruta_pdf)), width=110, caption="Miniatura")
+                else:
+                    st.caption("⚠️ Falta el archivo PDF")
+            with c_del:
+                if st.button("🗑️ Eliminar formato", key=f"del_condec_{k}"):
+                    guardar_condecoraciones([x for x in condec if x is not c])
+                    avisar(f"Formato «{c['nombre']}» eliminado.")
+                    st.rerun()
+
+            with st.expander(f"⚙️ Prefijo y calibración de «{c['nombre']}»"):
+                opciones = [AUTO] + prefijos
+                idx_pref = opciones.index(c["prefijo"]) if c.get("prefijo") in prefijos else 0
+                pref_sel = st.selectbox(
+                    "Prefijo del código de control para este formato:", opciones, index=idx_pref,
+                    format_func=lambda p: p if p == AUTO else f"{p} - {descripciones.get(p, '')}",
+                    key=f"pref_{k}",
+                )
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.markdown("**Nombre y cédula**")
+                    n_nom_y = st.number_input("Altura Y del nombre:", value=float(cfg["nombre_y"]), step=1.0, key=f"ny_{k}")
+                    n_nom_t = st.number_input("Tamaño máx. del nombre:", value=int(cfg["nombre_tamano_max"]), step=1, key=f"nt_{k}")
+                    n_ced_x = st.number_input("Posición X de la cédula:", value=float(cfg["cedula_x"]), step=1.0, key=f"cx_{k}")
+                    n_ced_y = st.number_input("Altura Y de la cédula:", value=float(cfg["cedula_y"]), step=0.5, key=f"cy_{k}")
+                    n_ced_t = st.number_input("Tamaño de la cédula:", value=float(cfg["cedula_tamano"]), step=0.5, key=f"ct_{k}")
+                with col2:
+                    st.markdown("**Firmantes**")
+                    n_fi_x = st.number_input("Centro X firmante izq.:", value=float(cfg["firmante_izq_x"]), step=2.0, key=f"fix_{k}")
+                    n_fd_x = st.number_input("Centro X firmante der.:", value=float(cfg["firmante_der_x"]), step=2.0, key=f"fdx_{k}")
+                    n_f_y = st.number_input("Altura Y de las firmas:", value=float(cfg["firmante_izq_y"]), step=2.0, key=f"fy_{k}")
+                    n_f_a = st.number_input("Ancho de la firma:", value=float(cfg["ancho_firma"]), step=5.0, key=f"fa_{k}")
+                with col3:
+                    st.markdown("**Fecha y código de control**")
+                    n_lf_x = st.number_input("Centro X de la fecha:", value=float(cfg["lugar_fecha_x"]), step=1.0, key=f"lx_{k}")
+                    n_lf_y = st.number_input("Altura Y de la fecha:", value=float(cfg["lugar_fecha_y"]), step=1.0, key=f"ly_{k}")
+                    n_cod_x = st.number_input("Centro X del código:", value=float(cfg["codigo_control_x"]), step=1.0, key=f"ccx_{k}")
+                    n_cod_y = st.number_input("Altura Y del código:", value=float(cfg["codigo_control_y"]), step=0.5, key=f"ccy_{k}")
+                    n_cod_t = st.number_input("Tamaño del código:", value=float(cfg["codigo_control_tamano"]), step=0.5, key=f"cct_{k}")
+
+                if st.button("💾 Guardar prefijo y calibración", key=f"save_cfg_{k}", type="primary"):
+                    c["config"] = {
+                        "nombre_y": n_nom_y, "nombre_tamano_max": n_nom_t,
+                        "cedula_x": n_ced_x, "cedula_y": n_ced_y, "cedula_tamano": n_ced_t,
+                        "lugar_fecha_x": n_lf_x, "lugar_fecha_y": n_lf_y,
+                        "codigo_control_x": n_cod_x, "codigo_control_y": n_cod_y, "codigo_control_tamano": n_cod_t,
+                        "firmante_izq_x": n_fi_x, "firmante_izq_y": n_f_y,
+                        "firmante_der_x": n_fd_x, "firmante_der_y": n_f_y,
+                        "ancho_firma": n_f_a,
+                    }
+                    if pref_sel == AUTO:
+                        c.pop("prefijo", None)
+                    else:
+                        c["prefijo"] = pref_sel
+                    guardar_condecoraciones(condec)
+                    avisar(f"Configuración de «{c['nombre']}» guardada.")
+                    st.rerun()
+            st.divider()
     else:
         st.write("No hay formatos registrados.")
-        
+
     st.markdown("---")
-    
-    st.subheader("➕ Cargar Formatos Oficiales (PDF o Word .docx)")
-    tipo_subida = st.radio("Método de subida:", ["Subir un solo formato", "📦 Subir Múltiples Formatos a la vez (Lote)"], horizontal=True)
-    
-    if tipo_subida == "Subir un solo formato":
-        with st.form("form_nueva_condec_ind", clear_on_submit=True):
-            nombre_condec = st.text_input("Nombre de la Distinción / Condecoración:", placeholder="ej. Barra Espíritu Scout en Oro")
-            archivo_subido = st.file_uploader("Archivo oficial (.pdf o .docx):", type=["pdf", "docx"])
-            textos_limpiar_word = st.text_input(
-                "Si subes un Word (.docx) ya rellenado, indica textos exactos a borrar (opcional, separados por coma):",
-                placeholder="ej. JUAN PEREZ, 12.345.678, Maracaibo 10 de abril"
+    st.subheader("➕ Cargar formatos oficiales (PDF o Word .docx)")
+    tipo = st.radio("Método de subida:", ["Subir un solo formato", "📦 Subir varios formatos a la vez"], horizontal=True)
+
+    if tipo == "Subir un solo formato":
+        with st.form("form_nueva_condec", clear_on_submit=True):
+            nombre = st.text_input("Nombre de la distinción / condecoración:", placeholder="ej. Barra Espíritu Scout en Oro")
+            archivo = st.file_uploader("Archivo oficial (.pdf o .docx):", type=["pdf", "docx"])
+            textos = st.text_input(
+                "Si el Word ya está rellenado, textos exactos a borrar (opcional, separados por coma):",
+                placeholder="ej. JUAN PEREZ, 12.345.678, Maracaibo 10 de abril",
             )
-            
-            btn_guardar_condec = st.form_submit_button("Guardar y Procesar Formato", type="primary")
-            if btn_guardar_condec:
-                if not nombre_condec.strip() or not archivo_subido:
-                    st.error("Por favor ingresa el nombre y sube el archivo PDF o Word.")
+            if st.form_submit_button("Guardar y procesar formato", type="primary"):
+                ident = slug(nombre)
+                if not nombre.strip() or not archivo:
+                    st.error("Ingresa el nombre y sube el archivo PDF o Word.")
+                elif any(c["id"] == ident or normalizar(c["nombre"]) == normalizar(nombre) for c in condec):
+                    st.error("Ya existe un formato con ese nombre. Elimínalo primero o usa otro nombre.")
                 else:
                     try:
-                        nombre_archivo_pdf = f"{nombre_condec.lower().replace(' ', '_')}.pdf"
-                        ruta_destino_pdf = os.path.join(PLANTILLAS_DIR, nombre_archivo_pdf)
-                        
-                        if archivo_subido.name.lower().endswith(".docx"):
-                            lista_borrar = [t.strip() for t in textos_limpiar_word.split(",") if t.strip()]
-                            with st.spinner("Limpiando documento Word y convirtiendo a plantilla PDF oficial..."):
-                                limpiar_y_convertir_docx_a_pdf(archivo_subido.getvalue(), ruta_destino_pdf, lista_borrar)
+                        archivo_pdf = f"{ident}.pdf"
+                        ruta_destino = os.path.join(PLANTILLAS_DIR, archivo_pdf)
+                        if archivo.name.lower().endswith(".docx"):
+                            borrar = [t.strip() for t in textos.split(",") if t.strip()]
+                            with st.spinner("Limpiando el Word y convirtiéndolo a PDF..."):
+                                limpiar_y_convertir_docx_a_pdf(archivo.getvalue(), ruta_destino, borrar)
                         else:
-                            with open(ruta_destino_pdf, "wb") as f_out:
-                                f_out.write(archivo_subido.getbuffer())
-                            
-                        condec_actuales.append({
-                            "id": nombre_condec.lower().replace(" ", "_"),
-                            "nombre": nombre_condec.strip(),
-                            "archivo_pdf": nombre_archivo_pdf,
-                            "config": DEFAULT_CONFIG.copy()
+                            with open(ruta_destino, "wb") as f_out:
+                                f_out.write(archivo.getbuffer())
+                        condec.append({
+                            "id": ident, "nombre": nombre.strip(),
+                            "archivo_pdf": archivo_pdf, "config": DEFAULT_CONFIG.copy(),
                         })
-                        guardar_condecoraciones(condec_actuales)
-                        st.success(f"Condecoración '{nombre_condec}' procesada y agregada correctamente.")
+                        guardar_condecoraciones(condec)
+                        avisar(f"Formato «{nombre.strip()}» agregado.")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Error al procesar el archivo: {e}")
     else:
-        st.markdown("""
-        Selecciona todos los archivos **PDF o Word (`.docx`)** que quieras cargar a la vez. Los documentos Word serán limpiados y convertidos a PDF automáticamente.
-        """)
-        archivos_multiples = st.file_uploader(
-            "Selecciona múltiples archivos PDF o DOCX:",
-            type=["pdf", "docx"],
-            accept_multiple_files=True
+        st.markdown("El nombre de cada formato se toma del nombre del archivo. Si el archivo ya existe, se reemplaza la plantilla y se conserva su calibración.")
+        archivos = st.file_uploader("Archivos PDF o DOCX:", type=["pdf", "docx"], accept_multiple_files=True)
+        textos_lote = st.text_input(
+            "Textos de ejemplo a borrar en los Word (opcional, separados por coma):",
+            placeholder="ej. NOMBRE DEL GALARDONADO, 00.000.000", key="limpiar_word_lote",
         )
-        textos_limpiar_lote = st.text_input(
-            "Textos de ejemplo a borrar en los archivos Word (opcional, separados por coma):",
-            placeholder="ej. NOMBRE DEL GALARDONADO, 00.000.000",
-            key="limpiar_word_lote"
-        )
-        if archivos_multiples:
-            st.info(f"Se seleccionaron **{len(archivos_multiples)} archivos** para subir.")
-            if st.button("🚀 Subir, Limpiar y Registrar Todo el Lote", type="primary"):
-                agregados = 0
-                lista_borrar_lote = [t.strip() for t in textos_limpiar_lote.split(",") if t.strip()]
+        if archivos:
+            st.info(f"**{len(archivos)} archivos** seleccionados.")
+            if st.button("🚀 Subir, limpiar y registrar todo", type="primary"):
+                agregados, actualizados = 0, 0
+                borrar = [t.strip() for t in textos_lote.split(",") if t.strip()]
                 with st.spinner("Procesando archivos..."):
-                    for up_file in archivos_multiples:
+                    for up in archivos:
                         try:
-                            nombre_base = os.path.splitext(up_file.name)[0]
-                            nombre_formateado = nombre_base.replace("_", " ").replace("-", " ").title()
-                            nombre_archivo_pdf = f"{nombre_base.lower().replace(' ', '_')}.pdf"
-                            ruta_destino_pdf = os.path.join(PLANTILLAS_DIR, nombre_archivo_pdf)
-                            
-                            if up_file.name.lower().endswith(".docx"):
-                                limpiar_y_convertir_docx_a_pdf(up_file.getvalue(), ruta_destino_pdf, lista_borrar_lote)
+                            base = os.path.splitext(up.name)[0]
+                            ident = slug(base)
+                            archivo_pdf = f"{ident}.pdf"
+                            ruta_destino = os.path.join(PLANTILLAS_DIR, archivo_pdf)
+                            if up.name.lower().endswith(".docx"):
+                                limpiar_y_convertir_docx_a_pdf(up.getvalue(), ruta_destino, borrar)
                             else:
-                                with open(ruta_destino_pdf, "wb") as f_out:
-                                    f_out.write(up_file.getbuffer())
-                                
-                            existente = next((c for c in condec_actuales if c["archivo_pdf"] == nombre_archivo_pdf), None)
-                            if not existente:
-                                condec_actuales.append({
-                                    "id": nombre_base.lower().replace(" ", "_"),
-                                    "nombre": nombre_formateado,
-                                    "archivo_pdf": nombre_archivo_pdf,
-                                    "config": DEFAULT_CONFIG.copy()
+                                with open(ruta_destino, "wb") as f_out:
+                                    f_out.write(up.getbuffer())
+                            if any(c["archivo_pdf"] == archivo_pdf or c["id"] == ident for c in condec):
+                                actualizados += 1
+                            else:
+                                condec.append({
+                                    "id": ident,
+                                    "nombre": base.replace("_", " ").replace("-", " ").strip().title(),
+                                    "archivo_pdf": archivo_pdf, "config": DEFAULT_CONFIG.copy(),
                                 })
                                 agregados += 1
                         except Exception as e:
-                            st.warning(f"No se pudo procesar '{up_file.name}': {e}")
-                        
-                guardar_condecoraciones(condec_actuales)
-                st.success(f"¡Se procesaron y agregaron **{agregados} nuevos formatos** al catálogo!")
+                            avisar(f"No se pudo procesar «{up.name}»: {e}", "warning")
+                guardar_condecoraciones(condec)
+                avisar(f"{agregados} formatos nuevos y {actualizados} plantillas reemplazadas.")
                 st.rerun()
 
-    # ---------------------------------------------------------------------
-    # SECCIÓN DE RESPALDO Y RESTAURACIÓN TOTAL EN ZIP
-    # ---------------------------------------------------------------------
-    st.markdown("---")
-    st.subheader("🛡️ Respaldo y Restauración Total del Sistema (ZIP)")
-    st.markdown("""
-    > **Protección para Streamlit Cloud:** Descarga periódicamente una copia de seguridad con todas tus plantillas, firmas digitalizadas, códigos de control y el Libro de Registro oficial. Si el servidor se reinicia, restaura todo en segundos.
-    """)
-    
-    col_resp1, col_resp2 = st.columns(2, gap="large")
-    with col_resp1:
-        st.markdown("#### 1. Exportar Copia de Seguridad")
-        zip_backup = crear_respaldo_sistema_zip(PLANTILLAS_DIR, FIRMAS_DIR, DATOS_DIR)
-        st.download_button(
-            label="📥 Descargar Respaldo Completo (ZIP)",
-            data=zip_backup,
-            file_name=f"Respaldo_Condecoraciones_ASV_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
-            mime="application/zip",
-            type="primary",
-            use_container_width=True
-        )
-        
-    with col_resp2:
-        st.markdown("#### 2. Restaurar desde Respaldo")
-        archivo_zip_restaurar = st.file_uploader("Subir archivo de respaldo (.zip):", type=["zip"], key="upload_zip_backup")
-        if archivo_zip_restaurar:
-            if st.button("📤 Restaurar Respaldo (ZIP) Ahora", type="primary", use_container_width=True):
+    if puede("respaldo"):
+        st.markdown("---")
+        st.subheader("🛡️ Respaldo y restauración total del sistema (ZIP)")
+        st.markdown("""
+        > **Protección para Streamlit Cloud:** descarga periódicamente una copia con las plantillas, firmas, códigos, usuarios y el Libro de Registro. Si el servidor se reinicia, restaura todo en segundos.
+        """)
+        c_r1, c_r2 = st.columns(2, gap="large")
+        with c_r1:
+            st.markdown("#### 1. Exportar copia de seguridad")
+            if st.button("Preparar respaldo"):
+                st.session_state["respaldo_zip"] = crear_respaldo_sistema_zip(PLANTILLAS_DIR, FIRMAS_DIR, DATOS_DIR)
+                st.session_state["respaldo_nombre"] = f"Respaldo_Condecoraciones_ASV_{ahora().strftime('%Y%m%d_%H%M')}.zip"
+            if "respaldo_zip" in st.session_state:
+                st.download_button(
+                    label="📥 Descargar respaldo completo (ZIP)",
+                    data=st.session_state["respaldo_zip"],
+                    file_name=st.session_state["respaldo_nombre"],
+                    mime="application/zip",
+                    type="primary",
+                )
+        with c_r2:
+            st.markdown("#### 2. Restaurar desde respaldo")
+            st.caption("Sobrescribe los datos actuales, incluidos los usuarios.")
+            zip_subido = st.file_uploader("Archivo de respaldo (.zip):", type=["zip"], key="upload_zip_backup")
+            if zip_subido and st.button("📤 Restaurar respaldo ahora", type="primary"):
                 try:
-                    total_restaurados = restaurar_respaldo_sistema_zip(
-                        archivo_zip_restaurar.getvalue(),
-                        PLANTILLAS_DIR,
-                        FIRMAS_DIR,
-                        DATOS_DIR
-                    )
-                    st.success(f"¡Sistema restaurado con éxito! Se recuperaron **{total_restaurados} archivos**.")
+                    total = restaurar_respaldo_sistema_zip(zip_subido.getvalue(), PLANTILLAS_DIR, FIRMAS_DIR, DATOS_DIR)
+                    avisar(f"Sistema restaurado: {total} archivos recuperados.")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error al restaurar el respaldo: {e}")
 
-# Pie de página Scout
+
+# -------------------------------------------------------------------------
+# VISTA: USUARIOS (solo Administrador)
+# -------------------------------------------------------------------------
+def hay_otro_admin(usuarios, excluir_usuario) -> bool:
+    if admin_maestro():
+        return True
+    return any(u.get("rol") == "admin" and u.get("activo", True) and u["usuario"] != excluir_usuario for u in usuarios)
+
+
+def vista_usuarios():
+    st.subheader("👥 Usuarios y niveles de acceso")
+    with st.expander("¿Qué puede hacer cada nivel?"):
+        for rol in ROLES.values():
+            st.markdown(f"- **{rol['nombre']}:** {rol['descripcion']}")
+
+    usuarios = cargar_usuarios()
+    yo = usuario_actual()
+    maestro = admin_maestro()
+    claves_rol = list(ROLES.keys())
+
+    if maestro:
+        st.info(f"Administrador principal definido en los Secrets: `{maestro['usuario']}`. No se puede editar ni borrar desde aquí.")
+    else:
+        st.warning("No hay administrador principal en los Secrets de Streamlit. Si el servidor se reinicia y se pierde "
+                   "usuarios.json, cualquiera podría crear el primer administrador. Configura [admin] en Secrets.")
+
+    if usuarios:
+        st.markdown(f"### Usuarios registrados ({len(usuarios)})")
+    for idx, u in enumerate(usuarios):
+        es_yo = u["usuario"] == yo
+        estado = "🟢 Activo" if u.get("activo", True) else "🔴 Desactivado"
+        titulo = f"{u.get('nombre') or u['usuario']} · `{u['usuario']}` · {ROLES.get(u.get('rol'), {}).get('nombre', '?')} · {estado}"
+        with st.expander(titulo + (" (tú)" if es_yo else "")):
+            with st.form(f"form_usuario_{idx}_{u['usuario']}"):
+                c1, c2 = st.columns(2)
+                with c1:
+                    nombre = st.text_input("Nombre completo:", value=u.get("nombre", ""))
+                    rol = st.selectbox(
+                        "Nivel de acceso:", claves_rol,
+                        index=claves_rol.index(u["rol"]) if u.get("rol") in claves_rol else len(claves_rol) - 1,
+                        format_func=lambda r: ROLES[r]["nombre"], disabled=es_yo,
+                    )
+                with c2:
+                    activo = st.checkbox("Cuenta activa", value=u.get("activo", True), disabled=es_yo)
+                    nueva = st.text_input("Nueva contraseña (vacío = no cambiar):", type="password")
+                if st.form_submit_button("Guardar cambios", type="primary"):
+                    pierde_admin = u.get("rol") == "admin" and u.get("activo", True) and (rol != "admin" or not activo)
+                    if pierde_admin and not hay_otro_admin(usuarios, u["usuario"]):
+                        st.error("Debe quedar al menos un administrador activo.")
+                    elif nueva and len(nueva) < 8:
+                        st.error("La contraseña debe tener al menos 8 caracteres.")
+                    else:
+                        u["nombre"] = nombre.strip() or u["usuario"]
+                        if not es_yo:
+                            u["rol"] = rol
+                            u["activo"] = activo
+                        if nueva:
+                            u["sal"], u["hash"] = hash_clave(nueva)
+                        guardar_usuarios(usuarios)
+                        avisar(f"Usuario «{u['usuario']}» actualizado.")
+                        st.rerun()
+            st.caption(f"Creado: {u.get('creado', '-')} por {u.get('creado_por', '-')}")
+            if not es_yo:
+                confirmar = st.checkbox("Confirmo que quiero eliminar este usuario", key=f"conf_del_usr_{idx}")
+                if st.button("🗑️ Eliminar usuario", key=f"del_usr_{idx}", disabled=not confirmar):
+                    if u.get("rol") == "admin" and not hay_otro_admin(usuarios, u["usuario"]):
+                        st.error("Debe quedar al menos un administrador activo.")
+                    else:
+                        guardar_usuarios([x for x in usuarios if x is not u])
+                        avisar(f"Usuario «{u['usuario']}» eliminado.")
+                        st.rerun()
+
+    st.subheader("➕ Crear nuevo usuario")
+    with st.form("form_nuevo_usuario", clear_on_submit=True):
+        c1, c2 = st.columns(2)
+        with c1:
+            usuario = st.text_input("Usuario (para iniciar sesión):", placeholder="ej. carmen.chacon")
+            nombre = st.text_input("Nombre completo:")
+            rol = st.selectbox("Nivel de acceso:", claves_rol, index=claves_rol.index("emisor"),
+                               format_func=lambda r: f"{ROLES[r]['nombre']}: {ROLES[r]['descripcion']}")
+        with c2:
+            clave = st.text_input("Contraseña inicial (mínimo 8 caracteres):", type="password")
+            repetir = st.text_input("Repetir contraseña:", type="password")
+        if st.form_submit_button("Crear usuario", type="primary"):
+            usuario = usuario.strip().lower()
+            error = validar_nueva_clave(clave, repetir)
+            if not re.fullmatch(r"[a-z0-9._-]{3,30}", usuario):
+                st.error("El usuario debe tener de 3 a 30 caracteres: letras sin acentos, números, punto, guion o guion bajo.")
+            elif any(u["usuario"] == usuario for u in usuarios) or (maestro and maestro["usuario"] == usuario):
+                st.error("Ese nombre de usuario ya existe.")
+            elif error:
+                st.error(error)
+            else:
+                sal, h = hash_clave(clave)
+                usuarios.append({
+                    "usuario": usuario, "nombre": nombre.strip() or usuario, "rol": rol, "activo": True,
+                    "sal": sal, "hash": h,
+                    "creado": ahora().strftime("%Y-%m-%d %H:%M:%S"), "creado_por": yo,
+                })
+                guardar_usuarios(usuarios)
+                avisar(f"Usuario «{usuario}» creado con nivel {ROLES[rol]['nombre']}.")
+                st.rerun()
+
+
+# -------------------------------------------------------------------------
+# PESTAÑAS SEGÚN EL NIVEL DEL USUARIO
+# -------------------------------------------------------------------------
+pestanas = []
+if puede("emitir"):
+    pestanas.append(("📜 Emitir Certificado", vista_emitir))
+if puede("registro"):
+    pestanas.append(("📖 Libro de Registro (Art. 35)", vista_registro))
+if puede("codigos"):
+    pestanas.append(("🏷️ Códigos de Control", vista_codigos))
+if puede("firmantes"):
+    pestanas.append(("✍️ Gestión de Firmantes", vista_firmantes))
+if puede("formatos"):
+    pestanas.append(("📁 Formatos y Respaldo", vista_formatos))
+if puede("usuarios"):
+    pestanas.append(("👥 Usuarios", vista_usuarios))
+
+for contenedor, (_, vista) in zip(st.tabs([p[0] for p in pestanas]), pestanas):
+    with contenedor:
+        vista()
+
 st.markdown("""
 <div class="scout-footer">
     ⚜️ <strong>Asociación de Scouts de Venezuela</strong> • Fundada en 1913 • Reconocida por WOSM<br>
