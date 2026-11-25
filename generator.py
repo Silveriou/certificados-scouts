@@ -344,4 +344,109 @@ def _limpiar_parrafo_docx(paragraph, extras: list):
         return
     # 1) Limpieza run por run (conserva todo el formato)
     for run in runs:
-        nuevo
+        nuevo = _limpiar_texto(run.text, extras)
+        if nuevo != run.text:
+            run.text = nuevo
+    # 2) Marcadores partidos entre varios runs: se consolida el párrafo
+    completo = "".join(r.text for r in runs)
+    limpio = _limpiar_texto(completo, extras)
+    if limpio != completo:
+        runs[0].text = limpio
+        for r in runs[1:]:
+            r.text = ""
+
+
+def _parrafos(elemento, parent):
+    """Todos los párrafos bajo un elemento: cuerpo, tablas y cuadros de texto."""
+    for p_el in elemento.iter(qn("w:p")):
+        yield Paragraph(p_el, parent)
+
+
+def limpiar_y_convertir_docx_a_pdf(docx_bytes: bytes, ruta_pdf_salida: str, textos_extra_borrar: list = None):
+    extras = textos_extra_borrar or []
+    doc = docx.Document(io.BytesIO(docx_bytes))
+
+    for p in _parrafos(doc.element.body, doc):
+        _limpiar_parrafo_docx(p, extras)
+
+    for section in doc.sections:
+        for parte in (section.header, section.footer):
+            if not parte.is_linked_to_previous:
+                for p in _parrafos(parte._element, parte):
+                    _limpiar_parrafo_docx(p, extras)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        temp_docx = os.path.join(tmpdir, "plantilla_limpia.docx")
+        temp_pdf = os.path.join(tmpdir, "plantilla_limpia.pdf")
+        doc.save(temp_docx)
+
+        convertido = False
+        soffice_bin = shutil.which("soffice") or shutil.which("libreoffice")
+        if soffice_bin:
+            subprocess.run(
+                [soffice_bin, "--headless", "--convert-to", "pdf", "--outdir", tmpdir, temp_docx],
+                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180,
+            )
+            if os.path.exists(temp_pdf):
+                shutil.copy(temp_pdf, ruta_pdf_salida)
+                convertido = True
+
+        if not convertido:
+            try:
+                try:
+                    import pythoncom
+                    pythoncom.CoInitialize()
+                except Exception:
+                    pass
+                from docx2pdf import convert
+                convert(temp_docx, ruta_pdf_salida)
+                convertido = os.path.exists(ruta_pdf_salida)
+            except Exception as e:
+                raise RuntimeError(f"No se pudo convertir el Word a PDF: {e}")
+
+        if not convertido:
+            raise RuntimeError("No se encontró LibreOffice ni Microsoft Word para convertir el archivo .docx a PDF.")
+
+
+# -------------------------------------------------------------------------
+# RESPALDO Y RESTAURACIÓN EN ZIP
+# -------------------------------------------------------------------------
+def crear_respaldo_sistema_zip(plantillas_dir: str, firmas_dir: str, datos_dir: str) -> bytes:
+    buf = io.BytesIO()
+    carpetas = {"plantillas": plantillas_dir, "firmas": firmas_dir, "datos": datos_dir}
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for nombre_carpeta, ruta_local in carpetas.items():
+            if os.path.exists(ruta_local):
+                for root, _, files in os.walk(ruta_local):
+                    for file in files:
+                        if file.startswith("_temp_") or file.endswith(".tmp"):
+                            continue
+                        full_path = os.path.join(root, file)
+                        rel_path = os.path.relpath(full_path, ruta_local).replace("\\", "/")
+                        z.write(full_path, f"{nombre_carpeta}/{rel_path}")
+    return buf.getvalue()
+
+
+def restaurar_respaldo_sistema_zip(zip_bytes: bytes, plantillas_dir: str, firmas_dir: str, datos_dir: str) -> int:
+    """Restaura plantillas, firmas y datos. Ignora rutas que intenten salir de esas carpetas."""
+    destinos = {"plantillas": plantillas_dir, "firmas": firmas_dir, "datos": datos_dir}
+    restaurados = 0
+    with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as z:
+        for member in z.namelist():
+            partes = [p for p in member.replace("\\", "/").split("/") if p]
+            if len(partes) < 2 or partes[0] not in destinos or member.endswith("/"):
+                continue
+            if any(p in ("..", ".") or ":" in p for p in partes):
+                continue
+            base = os.path.realpath(destinos[partes[0]])
+            ruta_final = os.path.realpath(os.path.join(base, *partes[1:]))
+            try:
+                if os.path.commonpath([base, ruta_final]) != base:
+                    continue
+            except ValueError:
+                continue
+            os.makedirs(os.path.dirname(ruta_final), exist_ok=True)
+            with z.open(member) as source, open(ruta_final, "wb") as target:
+                shutil.copyfileobj(source, target)
+            restaurados += 1
+    return restaurados
